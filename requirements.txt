@@ -1,0 +1,8 @@
+napari[all]
+cellpose
+readlif
+scikit-image
+pandas
+jupyter
+napari-cellpose
+pyshoc
