@@ -5,32 +5,29 @@
 
 ## 1. Objetivo del Proyecto
 
-El objetivo principal de este proyecto es desarrollar un flujo de trabajo para segmentar y analizar la morfología tridimensional de **astrocitos** en imágenes de microscopía confocal multi-canal. El análisis incluye la cuantificación de volúmenes celulares y un análisis de Sholl para caracterizar la complejidad de sus procesos.
+El objetivo es desarrollar un flujo de trabajo para segmentar y analizar la morfología tridimensional de astrocitos en imágenes de microscopía confocal multi-canal. El análisis se centra en la identificación de núcleos de astrocitos para su posterior caracterización morfológica.
 
 ## 2. Metodología Propuesta
 
-1.  **Carga de Datos `.lif`**: Las imágenes en formato propietario de Leica (`.lif`) se cargarán en Python utilizando la librería `readlif` para acceder a los z-stacks y a los metadatos de la imagen.
-2.  **Segmentación con Cellpose**: Se utilizará el modelo pre-entrenado de **Cellpose** para la segmentación de los núcleos (canal DAPI) y los cuerpos celulares de los **astrocitos** (canal GFAP). Este proceso se realizará de forma interactiva en `napari` a través del plugin `napari-cellpose`, permitiendo ajustes y correcciones manuales para garantizar la máxima precisión.
-3.  **Cuantificación de Volúmenes**: A partir de las máscaras de segmentación 3D, se calculará el volumen de cada **astrocito**/núcleo individual utilizando `scikit-image` (`regionprops_table`).
-4.  **Análisis de Sholl**: Para cuantificar la complejidad morfológica de los **astrocitos**, se implementará un análisis de Sholl. Este método consiste en trazar esferas concéntricas a partir del centroide de la célula y contar el número de intersecciones de los procesos astrocitarios con la superficie de cada esfera.
-5.  **Visualización 3D**: Se utilizará `napari` para generar visualizaciones 3D interactivas, superponiendo la imagen original, las máscaras de segmentación y los resultados del análisis de Sholl.
+El flujo de trabajo actual se basa en una estrategia de filtrado en múltiples etapas para aislar los núcleos de interés a partir del canal DAPI:
+
+1.  **Carga de Datos**: Las imágenes `.lif` se cargan utilizando la librería `readlif`.
+2.  **Pre-procesamiento (Filtrado de Intensidad)**: Se aplica un umbral de intensidad automático (**Otsu's Method**) al canal DAPI. Esto elimina el ruido de fondo de baja señal y proporciona una imagen más limpia para la segmentación.
+3.  **Segmentación con Cellpose**: El modelo de deep learning **Cellpose** se ejecuta sobre el canal DAPI pre-procesado para generar un "mapa" de etiquetas (`label mask`), donde cada objeto detectado es un núcleo potencial.
+4.  **Post-procesamiento (Filtrado por Tamaño)**: Se analizan las propiedades de cada objeto segmentado. Aquellos objetos cuyo volumen (en vóxeles) es inferior a un **umbral mínimo (`min_volume_threshold`)** son descartados, eliminando eficazmente los artefactos y segmentaciones de ruido.
+5.  **Almacenamiento y Visualización**: Las máscaras de etiquetas finales y limpias se guardan como archivos `.tif` para su posterior análisis y visualización en Napari.
 
 ## 3. Estructura del Repositorio
 
-- **/data**: Almacena los datos de imágenes (`.lif` en `raw` y máscaras en `processed`). Excluida del repositorio vía `.gitignore`.
-- **/notebooks**: Cuadernos de Jupyter para el análisis interactivo.
-- **/results**: Contiene los resultados finales (tablas `.csv` y figuras `.png`).
-- **/src**: Código Python reutilizable, como funciones para el análisis de Sholl.
+- **/data**: Almacena los datos de imágenes. Excluida del repositorio vía `.gitignore`.
+- **/notebooks**: Contiene la documentación detallada del flujo de trabajo, parámetros y guías de uso.
+- **/results**: Almacena los resultados finales como tablas y figuras.
+- **/src**: Contiene los scripts de Python para el procesamiento y la visualización.
 - `requirements.txt`: Lista de dependencias de Python del proyecto.
 
 ## 4. Cómo Empezar
 
 1.  **Clonar el repositorio.**
 2.  **Crear y activar el entorno virtual (`venv`).**
-3.  **Instalar las dependencias:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-4.  **Instalar el plugin de Cellpose en Napari:**
-    Dentro de Napari, ir a `Plugins > Install/Uninstall Package(s)` y buscar e instalar `cellpose-napari`.
-5.  **Ejecutar los cuadernos en VS Code.**
+3.  **Instalar las dependencias (`pip install -r requirements.txt`).**
+4.  **Ejecutar los scripts** desde la carpeta `/src` para procesar las imágenes y visualizar los resultados.
