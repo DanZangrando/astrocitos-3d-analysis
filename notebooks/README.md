@@ -22,3 +22,11 @@ Esta carpeta contiene los cuadernos de Jupyter que detallan el proceso de análi
     3.  Implementación del **análisis de Sholl** para cada astrocito segmentado.
     4.  Generación de visualizaciones 3D de los resultados en Napari.
     5.  Exportación de los datos cuantitativos a la carpeta `/results/tables`.
+
+
+## Tareas Pendientes:
+
+  - Agregar filtro de exclusión de núcleos para el caso de la microgía con la mísma metodología que en el caso de los astrocitos.
+  
+  - Analize Particles (Fiji), ver librerías python/napari.
+
