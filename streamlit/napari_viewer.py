@@ -90,7 +90,7 @@ def load_image_any(path: Path):
         raise ValueError(f"Extensión no soportada: {suffix}")
 
 
-def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose_path: Path | None = None, gfap_path: Path | None = None, final_path: Path | None = None):
+def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose_path: Path | None = None, gfap_path: Path | None = None, final_path: Path | None = None, skeleton_path: Path | None = None):
     image, axes = load_image_any(image_path)
     image = reorder_to_zcyx(image, axes)
 
@@ -138,6 +138,13 @@ def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose
             v.add_labels(final_mask, name="04 - Astrocitos Finales", scale=scale, visible=True)
         except Exception as e:
             print(f"Advertencia: no se pudo cargar Máscara Final {final_path}: {e}")
+
+    if skeleton_path is not None and Path(skeleton_path).exists():
+        try:
+            skel = tifffile.imread(str(skeleton_path))
+            v.add_labels(skel, name="05 - Skeleton (labels)", scale=scale, visible=True)
+        except Exception as e:
+            print(f"Advertencia: no se pudo cargar Skeleton {skeleton_path}: {e}")
     napari.run()
 
 
@@ -151,6 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--cellpose", type=str, required=False, help="Ruta a 02_cellpose_mask.tif")
     parser.add_argument("--gfap", type=str, required=False, help="Ruta a 03_gfap_microglia_filtered_mask.tif")
     parser.add_argument("--final", type=str, required=False, help="Ruta a 04_final_astrocytes_mask.tif")
+    parser.add_argument("--skeleton", type=str, required=False, help="Ruta a 05_skeleton_labels.tif")
     args = parser.parse_args()
 
     p = Path(args.path)
@@ -162,4 +170,5 @@ if __name__ == "__main__":
         Path(args.cellpose) if args.cellpose else None,
         Path(args.gfap) if args.gfap else None,
         Path(args.final) if args.final else None,
+        Path(args.skeleton) if args.skeleton else None,
     )
