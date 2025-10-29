@@ -154,29 +154,8 @@ z_um = float(cal.get('z', 1.0))
 y_um = float(cal.get('y', 1.0))
 x_um = float(cal.get('x', 1.0))
 def_iso = float(min(z_um, y_um, x_um))
-with gcol2:
-    target_iso_um = st.number_input("Vóxel isotrópico objetivo (µm)", value=def_iso, min_value=0.05, step=0.01, format="%.2f")
-with gcol3:
-    padding_um = st.number_input("Padding ROI (µm)", value=2.0, min_value=0.0, step=0.5)
 
-mcol1, mcol2, mcol3 = st.columns(3)
-with mcol1:
-    thresh_mode = st.selectbox("Umbral GFAP", options=["Otsu (ROI)", "Manual"], index=0)
-with mcol2:
-    manual_thr = st.number_input("Umbral manual", value=50, min_value=0, step=1)
-with mcol3:
-    closing_um = st.number_input("Cierre morfológico (µm)", value=0.8, min_value=0.0, step=0.2, format="%.2f")
-
-# Parámetro para capturar GFAP conectado más allá del núcleo
-seedcol1, seedcol2 = st.columns(2)
-with seedcol1:
-    seed_dilate_um = st.number_input("Dilatación de semilla (µm)", value=2.0, min_value=0.0, step=0.5, help="Se dilata la máscara del núcleo en el espacio isotrópico para seleccionar el GFAP conectado a ese núcleo.")
-with seedcol2:
-    connectivity = st.selectbox("Conectividad 3D", options=[6, 26], index=1, help="Usada para seleccionar el componente de GFAP conectado a la semilla.")
-
-# Radio máximo según el cascarón de la etapa de filtrado (página 03)
-# Intentamos leer MAX_DILATION_ITERATIONS de params locales o globales
-default_max_radius_um = None
+# Cargar parámetros previos (prioridad: locales del preparado > globales) para autocompletar UI
 try:
     params_local = json.loads((out_dir / "params.json").read_text()) if (out_dir / "params.json").exists() else {}
 except Exception:
@@ -185,23 +164,76 @@ try:
     params_global = json.loads((root / "streamlit" / "experiment_params.json").read_text()) if (root / "streamlit" / "experiment_params.json").exists() else {}
 except Exception:
     params_global = {}
-mdi = params_local.get("MAX_DILATION_ITERATIONS") or params_global.get("MAX_DILATION_ITERATIONS")
-if mdi is not None:
-    try:
-        default_max_radius_um = float(mdi) * float(target_iso_um)
-    except Exception:
-        default_max_radius_um = None
-if default_max_radius_um is None:
-    default_max_radius_um = float(10.0) * float(target_iso_um)
 
+def _get_param(name: str, fallback):
+    if name in params_local:
+        return params_local.get(name)
+    if name in params_global:
+        return params_global.get(name)
+    return fallback
+
+# Defaults desde JSON si existen
+default_target_iso_um = float(_get_param("SKELETON_TARGET_ISO_UM", def_iso))
+default_padding_um = float(_get_param("SKELETON_PADDING_UM", 2.0))
+default_seed_dilate_um = float(_get_param("SKELETON_SEED_DILATE_UM", 2.0))
+default_connectivity = int(_get_param("SKELETON_CONNECTIVITY", 26))
+default_closing_um = float(_get_param("SKELETON_CLOSING_UM", 0.8))
+default_territory_voronoi = bool(_get_param("SKELETON_TERRITORY_VORONOI", False))
+default_territory_excl_um = float(_get_param("SKELETON_TERRITORY_EXCLUSION_UM", 1.0))
+
+# Calcular default de radio máximo: preferir SKELETON_MAX_RADIUS_UM; si no, derivar de MAX_DILATION_ITERATIONS
+mdi = params_local.get("MAX_DILATION_ITERATIONS") or params_global.get("MAX_DILATION_ITERATIONS")
+if "SKELETON_MAX_RADIUS_UM" in params_local or "SKELETON_MAX_RADIUS_UM" in params_global:
+    default_max_radius_um = float(_get_param("SKELETON_MAX_RADIUS_UM", 10.0 * default_target_iso_um))
+elif mdi is not None:
+    try:
+        default_max_radius_um = float(mdi) * float(default_target_iso_um)
+    except Exception:
+        default_max_radius_um = float(10.0) * float(default_target_iso_um)
+else:
+    default_max_radius_um = float(10.0) * float(default_target_iso_um)
+with gcol2:
+    target_iso_um = st.number_input("Vóxel isotrópico objetivo (µm)", value=float(default_target_iso_um), min_value=0.05, step=0.01, format="%.2f")
+with gcol3:
+    padding_um = st.number_input("Padding ROI (µm)", value=float(default_padding_um), min_value=0.0, step=0.5)
+
+mcol1, mcol2, mcol3 = st.columns(3)
+thresh_options = ["Otsu (ROI)", "Manual"]
+_saved_thresh_mode = str(_get_param("SKELETON_THRESHOLD_MODE", thresh_options[0]))
+_saved_thresh_mode_l = _saved_thresh_mode.lower()
+_def_idx = 0 if _saved_thresh_mode_l.startswith("otsu") else 1 if _saved_thresh_mode_l.startswith("manual") else 0
+with mcol1:
+    thresh_mode = st.selectbox("Umbral GFAP", options=thresh_options, index=_def_idx)
+with mcol2:
+    default_manual_thr = float(_get_param("SKELETON_MANUAL_THRESHOLD", 50))
+    manual_thr = st.number_input("Umbral manual", value=float(default_manual_thr), min_value=0.0, step=1.0, format="%.0f")
+with mcol3:
+    closing_um = st.number_input("Cierre morfológico (µm)", value=float(default_closing_um), min_value=0.0, step=0.2, format="%.2f")
+
+# Parámetro para capturar GFAP conectado más allá del núcleo
+seedcol1, seedcol2 = st.columns(2)
+with seedcol1:
+    seed_dilate_um = st.number_input("Dilatación de semilla (µm)", value=float(default_seed_dilate_um), min_value=0.0, step=0.5, help="Se dilata la máscara del núcleo en el espacio isotrópico para seleccionar el GFAP conectado a ese núcleo.")
+with seedcol2:
+    connectivity = st.selectbox("Conectividad 3D", options=[6, 26], index=(1 if default_connectivity == 26 else 0), help="Usada para seleccionar el componente de GFAP conectado a la semilla.")
+
+# Radio máximo desde núcleo (usar defaults ya calculados desde JSON/MDI)
 radiuscol = st.columns(1)[0]
 with radiuscol:
     max_radius_um = st.number_input("Radio máximo desde núcleo (µm)", value=float(round(default_max_radius_um, 2)), min_value=0.0, step=0.5, help="Limita el GFAP a una distancia radial equivalente al cascarón usado en la etapa de filtrado.")
+
+# Territorios de exclusión entre células
+tcol1, tcol2 = st.columns(2)
+with tcol1:
+    territory_voronoi = st.checkbox("Territorios por proximidad al núcleo (Voronoi)", value=bool(default_territory_voronoi), help="Restringe el GFAP de cada célula a su territorio más cercano al núcleo.")
+with tcol2:
+    territory_excl_um = st.number_input("Zona de exclusión en frontera (µm)", value=float(default_territory_excl_um), min_value=0.0, step=0.2, format="%.2f", help="Crea un ‘gap’ alrededor de los límites entre territorios para evitar entrelazados ambíguos.")
 
 save_skel_params = st.button("� Guardar parámetros del skeleton (sidebar)")
 if save_skel_params:
     exp_params_path = root / "streamlit" / "experiment_params.json"
     exp = params_global.copy()
+    _mode_str = "manual" if str(thresh_mode).lower().startswith("manual") else "otsu"
     exp.update({
         "SKELETON_TARGET_ISO_UM": float(target_iso_um),
         "SKELETON_PADDING_UM": float(padding_um),
@@ -209,10 +241,19 @@ if save_skel_params:
         "SKELETON_CONNECTIVITY": int(connectivity),
         "SKELETON_CLOSING_UM": float(closing_um),
         "SKELETON_MAX_RADIUS_UM": float(max_radius_um),
+        "SKELETON_THRESHOLD_MODE": _mode_str,
+        "SKELETON_MANUAL_THRESHOLD": float(manual_thr),
+        "SKELETON_TERRITORY_VORONOI": bool(territory_voronoi),
+        "SKELETON_TERRITORY_EXCLUSION_UM": float(territory_excl_um),
     })
     exp_params_path.parent.mkdir(parents=True, exist_ok=True)
     exp_params_path.write_text(json.dumps(exp, indent=2))
     st.success(f"Parámetros del skeleton guardados en {exp_params_path.relative_to(root)}")
+
+conflict_resolve = st.checkbox(
+    "Resolver solapamientos por cercanía al núcleo (µm)",
+    value=True,
+    help="Si dos esqueletos se superponen, se asigna el vóxel al astro más cercano al núcleo en distancia física.")
 
 run_skel = st.button("�🕸️ Esqueletizar y Guardar")
 open_napari = st.button("👁️ Abrir en Napari (con skeleton)")
@@ -280,17 +321,33 @@ def run_skeletonization():
     skel_dir = out_dir / "skeletons"
     skel_dir.mkdir(parents=True, exist_ok=True)
     combined_labels = np.zeros_like(mask, dtype=np.uint16)
+    combined_dist_um = np.full(mask.shape, np.inf, dtype=np.float32) if conflict_resolve else None
+
+    # Centroides de núcleos en coordenadas físicas (µm) para resolver solapamientos
+    label_centroid_um = {}
+    if conflict_resolve:
+        for p in regionprops(mask.astype(np.int32)):
+            lab_id = int(p.label)
+            cz, cy, cx = p.centroid  # en índices de vóxel (Z,Y,X)
+            label_centroid_um[lab_id] = (
+                float(cz) * float(z_um),
+                float(cy) * float(y_um),
+                float(cx) * float(x_um),
+            )
 
     # Parámetros calibrados
     zf, yf, xf = _zoom_factors(z_um, y_um, x_um, target_iso_um)
     closing_r_vox = _um_to_vox(closing_um, target_iso_um) if closing_um > 0 else 0
     seed_r_vox = _um_to_vox(seed_dilate_um, target_iso_um) if seed_dilate_um > 0 else 0
     max_r_vox = _um_to_vox(max_radius_um, target_iso_um) if max_radius_um > 0 else 0
+    excl_r_vox = _um_to_vox(territory_excl_um, target_iso_um) if 'territory_excl_um' in globals() else 0
 
     # Padding en voxeles originales (anisotrópicos) por eje
-    pad_z = _um_to_vox(padding_um, z_um)
-    pad_y = _um_to_vox(padding_um, y_um)
-    pad_x = _um_to_vox(padding_um, x_um)
+    # Importante: incluir el radio máximo solicitado, de lo contrario el recorte de la ROI
+    # puede truncar procesos largos aunque max_radius_um sea alto.
+    pad_z = _um_to_vox(padding_um + max_radius_um, z_um)
+    pad_y = _um_to_vox(padding_um + max_radius_um, y_um)
+    pad_x = _um_to_vox(padding_um + max_radius_um, x_um)
 
     labels = np.unique(mask)
     labels = labels[labels > 0]
@@ -311,10 +368,12 @@ def run_skeletonization():
 
         roi_mask = reg_mask[z0:z1, y0:y1, x0:x1]
         roi_gfap = gfap[z0:z1, y0:y1, x0:x1].astype(np.float32)
+        roi_all_labels = mask[z0:z1, y0:y1, x0:x1]
 
         # Remuestreo a isotrópico
         roi_mask_iso = _resize_to_isotropic(roi_mask.astype(np.uint8), (zf, yf, xf), order=0) > 0.5
         roi_gfap_iso = _resize_to_isotropic(roi_gfap, (zf, yf, xf), order=1)
+        roi_all_labels_iso = _resize_to_isotropic(roi_all_labels.astype(np.int32), (zf, yf, xf), order=0).astype(np.int32)
 
         # Umbral en ROI
         if thresh_mode.startswith("Otsu"):
@@ -347,6 +406,41 @@ def run_skeletonization():
         else:
             bin_iso = np.zeros_like(bin_gfap_iso, dtype=bool)
 
+        # 3.5) Territorios por proximidad al núcleo + zona de exclusión en frontera
+        if 'territory_voronoi' in globals() and territory_voronoi:
+            labs_here = np.unique(roi_all_labels_iso)
+            labs_here = labs_here[labs_here > 0]
+            if labs_here.size > 0:
+                # Calcular centroides en coordenadas de vóxel isotrópicas
+                props_here = regionprops(roi_all_labels_iso)
+                centroids = {int(p.label): p.centroid for p in props_here}
+                # Greedy Voronoi: mantener mejor distancia por vóxel
+                Z, Y, X = roi_all_labels_iso.shape
+                zz = np.arange(Z, dtype=np.float32)[:, None, None]
+                yy = np.arange(Y, dtype=np.float32)[None, :, None]
+                xx = np.arange(X, dtype=np.float32)[None, None, :]
+                best_d2 = np.full((Z, Y, X), np.inf, dtype=np.float32)
+                best_lab = np.zeros((Z, Y, X), dtype=np.int32)
+                for l in labs_here:
+                    cz, cy, cx = centroids.get(int(l), (None, None, None))
+                    if cz is None:
+                        continue
+                    dz = zz - float(cz)
+                    dy = yy - float(cy)
+                    dx = xx - float(cx)
+                    d2 = dz*dz + dy*dy + dx*dx
+                    better = d2 < best_d2
+                    best_lab[better] = int(l)
+                    best_d2[better] = d2[better]
+                terr_lab = (best_lab == int(lab))
+                if excl_r_vox and excl_r_vox > 0:
+                    # Gap desde la frontera: mantener solo interior a distancia >= excl_r_vox
+                    from scipy.ndimage import distance_transform_edt as _edt
+                    interior = _edt(terr_lab) >= float(excl_r_vox)
+                    terr_lab = terr_lab & interior
+                # Restringir GFAP al territorio (y posible gap)
+                bin_iso &= terr_lab
+
         # 4) Limitar a radio máximo desde la semilla (distancia euclidiana en isotrópico)
         if max_r_vox > 0 and np.any(bin_iso):
             dist = distance_transform_edt(~seed_iso)
@@ -359,9 +453,34 @@ def run_skeletonization():
         skel_voxels = int(np.count_nonzero(skel_iso))
         approx_length_um = skel_voxels * float(target_iso_um)
 
-        # Reescalar a forma original del ROI y pegar en canvas combinado
+        # Reescalar a forma original del ROI
         skel_roi = _resize_to_original(skel_iso.astype(np.uint8), roi_mask.shape, order=0) > 0.5
-        combined_labels[z0:z1, y0:y1, x0:x1][skel_roi] = lab
+
+        # Pegar en canvas combinado con resolución de conflictos opcional
+        target_slice = combined_labels[z0:z1, y0:y1, x0:x1]
+        if conflict_resolve:
+            dist_slice = combined_dist_um[z0:z1, y0:y1, x0:x1]
+            # Distancia física de cada vóxel del ROI al centroide del núcleo actual
+            cz_um, cy_um, cx_um = label_centroid_um.get(int(lab), (None, None, None))
+            if cz_um is None:
+                # Sin centroide: fallback a sobrescribir simple
+                target_slice[skel_roi] = lab
+            else:
+                # Construir mallas 1D y broadcast para evitar alta memoria
+                zz = (np.arange(z0, z1, dtype=np.float32) * float(z_um))[:, None, None]
+                yy = (np.arange(y0, y1, dtype=np.float32) * float(y_um))[None, :, None]
+                xx = (np.arange(x0, x1, dtype=np.float32) * float(x_um))[None, None, :]
+                # Distancia euclidiana en µm
+                dist_um = np.sqrt((zz - cz_um) ** 2 + (yy - cy_um) ** 2 + (xx - cx_um) ** 2)
+                # Voxeles candidatos del esqueleto actual
+                cand = skel_roi
+                # Aceptar si estaba vacío o si estamos más cerca que lo asignado previamente
+                better = cand & ((target_slice == 0) | (dist_um < dist_slice))
+                target_slice[better] = lab
+                dist_slice[better] = dist_um[better]
+        else:
+            # Asignación simple (último gana)
+            target_slice[skel_roi] = lab
 
         # Guardar por etiqueta
         tifffile.imwrite(skel_dir / f"astro_{int(lab)}_skeleton_roi.tif", skel_roi.astype(np.uint8))
@@ -384,6 +503,7 @@ def run_skeletonization():
         df.to_csv(skel_dir / "summary.csv", index=False)
     # Persistir parámetros de skeleton en params por preparado
     try:
+        _mode_str = "manual" if str(thresh_mode).lower().startswith("manual") else "otsu"
         run_params = {
             "SKELETON_TARGET_ISO_UM": float(target_iso_um),
             "SKELETON_PADDING_UM": float(padding_um),
@@ -391,6 +511,10 @@ def run_skeletonization():
             "SKELETON_CONNECTIVITY": int(connectivity),
             "SKELETON_CLOSING_UM": float(closing_um),
             "SKELETON_MAX_RADIUS_UM": float(max_radius_um),
+            "SKELETON_THRESHOLD_MODE": _mode_str,
+            "SKELETON_MANUAL_THRESHOLD": float(manual_thr),
+            "SKELETON_TERRITORY_VORONOI": bool(territory_voronoi),
+            "SKELETON_TERRITORY_EXCLUSION_UM": float(territory_excl_um),
         }
         params_path = out_dir / "params.json"
         current = {}
