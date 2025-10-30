@@ -26,7 +26,7 @@ napari_script = root / "streamlit" / "napari_viewer.py"
 def _read_global_calibration():
     if calib_path.exists():
         try:
-            return json.loads(calib_path.read_text())  # {"z":..,"y":..,"x":..}
+            return json.loads(calib_path.read_text())  # Unificado: metadatos físicos + parámetros globales
         except Exception:
             pass
     return {}
@@ -58,51 +58,13 @@ def reorder_to_zcyx(arr: np.ndarray, axes: str | None):
 
 
 def load_image_any(path: Path):
-    """Carga .tif/.tiff con tifffile o .lif con readlif y devuelve (array, axes str or None)."""
+    """Carga .tif/.tiff con tifffile y devuelve (array, axes str or None)."""
     suffix = path.suffix.lower()
     if suffix in ('.tif', '.tiff'):
         with tifffile.TiffFile(str(path)) as tf:
             series = tf.series[0]
             axes = getattr(series, 'axes', None)
             arr = series.asarray()
-        return arr, axes
-    elif suffix == '.lif':
-        import readlif
-        rdr = readlif.Reader(str(path))
-        try:
-            img0 = rdr.get_image(0)
-            arr = np.asarray(img0)
-        except Exception:
-            series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else []
-            if series_list:
-                s0 = series_list[0]
-                try:
-                    arr = np.asarray(s0)
-                except Exception as e:
-                    raise RuntimeError(f"No se pudo leer la primera serie del LIF: {e}")
-            else:
-                raise RuntimeError("No se encontraron series en el LIF")
-
-        # Deduce ejes para LIF
-        if arr.ndim == 3:  # Z,Y,X
-            arr = arr[:, None, :, :]
-            axes = 'ZCYX'
-        elif arr.ndim == 4:
-            chan_axis = int(np.argmin(arr.shape))
-            if chan_axis != 1:
-                arr = np.moveaxis(arr, chan_axis, 1)
-            axes = None  # ya está en Z,C,Y,X por heurística
-        elif arr.ndim == 5:  # asumir T presente
-            arr = arr[0]
-            if arr.ndim == 4:
-                chan_axis = int(np.argmin(arr.shape))
-                if chan_axis != 1:
-                    arr = np.moveaxis(arr, chan_axis, 1)
-                axes = None
-            else:
-                raise ValueError(f"Forma LIF no soportada: {arr.shape}")
-        else:
-            raise ValueError(f"Forma LIF no soportada: {arr.shape}")
         return arr, axes
     else:
         raise ValueError(f"Extensión no soportada: {suffix}")
@@ -119,41 +81,92 @@ def existing_results(out_dir: Path) -> dict:
     return {
         "otsu": (out_dir / "01_otsu_mask.tif").exists(),
         "cellpose": (out_dir / "02_cellpose_mask.tif").exists(),
-        "params": (out_dir / "params.json").exists(),
     }
 
 
-def save_params(out_dir: Path, updates: dict):
-    params_path = out_dir / "params.json"
-    current = {}
-    if params_path.exists():
-        try:
-            current = json.loads(params_path.read_text())
-        except Exception:
-            current = {}
-    current.update(updates)
-    params_path.write_text(json.dumps(current, indent=2))
-
-
 # --------- 1) Selección de imagen ---------
-files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.lif")])
+files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
 if not files:
-    st.warning("No se encontraron archivos .tif/.lif en data/raw.")
+    st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
     st.stop()
 
-labels = [str(p.relative_to(root)) for p in files]
-idx = st.selectbox("Elegí un preparado", options=list(range(len(files))), format_func=lambda i: labels[i])
-img_path = files[idx]
+def _detect_group(p: Path, root: Path) -> str:
+    try:
+        rel = str(p.relative_to(root)).lower()
+    except Exception:
+        rel = str(p).lower()
+    if "/hip/" in rel:
+        return "Hipoxia"
+    if "/ctl/" in rel:
+        return "CTL"
+    return "CTL"
+
+# Filtro por grupo (unificado desde la barra lateral)
+group_filter = st.session_state.get("group_filter", "Todos")
+if group_filter == "Todos":
+    files_avail = files
+else:
+    files_avail = [p for p in files if _detect_group(p, root) == group_filter]
+if not files_avail:
+    st.info("No hay preparados para el grupo seleccionado.")
+    st.stop()
+
+labels = [str(p.relative_to(root)) for p in files_avail]
+idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))), format_func=lambda i: labels[i])
+img_path = files_avail[idx]
 out_dir = get_output_dir_for_image(img_path)
 status = existing_results(out_dir)
 
-st.markdown("### Estado de resultados guardados")
-st.write({
-    "otsu_mask": status["otsu"],
-    "cellpose_mask": status["cellpose"],
-    "params_json": status["params"],
-    "output_dir": str(out_dir.relative_to(root)),
-})
+group = _detect_group(img_path, root)
+
+st.markdown("### Resumen rápido")
+# Cargar métricas si existen
+otsu_frac = None
+cp_count = None
+try:
+    if (out_dir / "01_otsu_mask.tif").exists():
+        otsu_mask = tifffile.imread(out_dir / "01_otsu_mask.tif").astype(bool)
+        otsu_frac = float(otsu_mask.mean()) if otsu_mask.size else 0.0
+    if (out_dir / "02_cellpose_mask.tif").exists():
+        cp_mask = tifffile.imread(out_dir / "02_cellpose_mask.tif")
+        cp_count = int(cp_mask.max())
+except Exception:
+    pass
+
+m1, m2 = st.columns(2)
+m1.metric("Otsu calculado", "Sí" if status["otsu"] else "No")
+m2.metric("Cellpose calculado", "Sí" if status["cellpose"] else "No")
+
+if status["otsu"] or status["cellpose"]:
+    s1, s2 = st.columns(2)
+    s1.metric("Fracción voxeles Otsu", f"{100*otsu_frac:.1f}%" if isinstance(otsu_frac, (int,float)) else "—")
+    s2.metric("Núcleos Cellpose", cp_count if isinstance(cp_count, int) else "—")
+
+def _group_badge_html(group: str) -> str:
+    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
+
+st.markdown(_group_badge_html(group) + f"&nbsp;· Directorio: {out_dir.relative_to(root)}", unsafe_allow_html=True)
+
+# --------- Recalcular por ámbito desde este paso ---------
+with st.expander("Recalcular por ámbito desde este paso", expanded=False):
+    scope = st.radio("Ámbito", options=["Preparado seleccionado", "Grupo", "Todos"], horizontal=True, key="p02_scope")
+    scope_group = None
+    if scope == "Grupo":
+        scope_group = st.selectbox("Grupo", options=["CTL","Hipoxia"], index=0, key="p02_scope_group")
+    include_otsu = st.checkbox("Incluir Otsu (recalcular desde 01)", value=True, key="p02_inc_otsu")
+    if st.button("▶️ Recalcular", key="p02_recalc"):
+        try:
+            from ui.runner import run_scope, read_calibration
+            cal = read_calibration(root/"streamlit"/"calibration.json")
+            start = "01" if include_otsu else "02"
+            sc = "selected" if scope=="Preparado seleccionado" else ("group" if scope=="Grupo" else "all")
+            sel = img_path if sc=="selected" else None
+            res = run_scope(root, scope=sc, start_step=start, cal=cal, selected=sel, group=scope_group, overwrite_from_step=True)
+            ok = sum(1 for _, stt in res if not stt.get("error"))
+            st.success(f"Listo: {ok}/{len(res)} preparados procesados desde {start}.")
+        except Exception as e:
+            st.error(f"Error al ejecutar: {e}")
 
 
 # --------- 2) Calibración global (solo informativo) ---------
@@ -192,8 +205,8 @@ def compute_and_save_otsu(dapi_vol: np.ndarray, out_dir: Path):
     thr = threshold_otsu(dapi_vol)
     otsu_mask = (dapi_vol > thr)
     tifffile.imwrite(out_dir / "01_otsu_mask.tif", otsu_mask.astype(np.uint8))
-    save_params(out_dir, {"otsu_threshold": float(thr)})
     st.success("Máscara de Otsu guardada (01_otsu_mask.tif)")
+    st.info(f"Umbral Otsu: {thr:.1f} | Fracción en máscara: {100*otsu_mask.mean():.1f}%")
     return otsu_mask
 
 
@@ -214,7 +227,6 @@ def compute_and_save_cellpose(dapi_vol_clean: np.ndarray, out_dir: Path):
         do_3D=True,
     )
     tifffile.imwrite(out_dir / "02_cellpose_mask.tif", masks.astype(np.uint16))
-    save_params(out_dir, {"nucleus_diameter_px": int(nucleus_diameter), "cellpose_gpu": bool(use_gpu)})
     st.success("Máscara de Cellpose guardada (02_cellpose_mask.tif)")
     return masks
 
@@ -277,18 +289,14 @@ def _launch_napari(include_masks: bool):
         if cellpose_path.exists():
             cmd += ["--cellpose", str(cellpose_path)]
     try:
+        env["NAPARI_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         subprocess.Popen(cmd, env=env)
         st.info("Napari lanzado en una ventana separada.")
     except Exception as e:
         st.error(f"No se pudo lanzar Napari: {e}")
-
 
 if open_napari_image:
     _launch_napari(include_masks=False)
 
 if open_napari_with_masks:
     _launch_napari(include_masks=True)
-
-
-st.markdown("---")
-st.caption("Consejo: Mantené consistentes los nombres de salida. Esta página guarda 01_otsu_mask.tif y 02_cellpose_mask.tif en data/processed/<preparado>/ para que las siguientes etapas los encuentren fácilmente.")

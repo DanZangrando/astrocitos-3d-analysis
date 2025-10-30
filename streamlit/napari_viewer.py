@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import tifffile
 import napari
-import readlif
 
 
 def reorder_to_zcyx(arr, axes: str | None):
@@ -33,7 +32,7 @@ def reorder_to_zcyx(arr, axes: str | None):
 
 
 def load_image_any(path: Path):
-    """Carga .tif/.tiff con tifffile o .lif con readlif y devuelve (image Z,C,Y,X, axes str or None)."""
+    """Carga .tif/.tiff con tifffile y devuelve (image, axes str or None)."""
     suffix = path.suffix.lower()
     if suffix in ('.tif', '.tiff'):
         with tifffile.TiffFile(str(path)) as tf:
@@ -41,56 +40,11 @@ def load_image_any(path: Path):
             axes = getattr(series, 'axes', None)
             arr = series.asarray()
         return arr, axes
-    elif suffix == '.lif':
-        rdr = readlif.Reader(str(path))
-        # Tomamos la primera imagen/serie
-        try:
-            img0 = rdr.get_image(0)
-            arr = np.asarray(img0)
-        except Exception:
-            # Fallback: algunas versiones exponen getSeries
-            series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else []
-            if series_list:
-                s0 = series_list[0]
-                # Intentamos obtener un volumen 4D aproximado
-                try:
-                    arr = np.asarray(s0)
-                except Exception:
-                    raise RuntimeError("No se pudo leer la primera serie del LIF")
-            else:
-                raise RuntimeError("No se encontraron series en el LIF")
-
-        # Intento de deducir ejes para LIF: comúnmente (Z, Y, X) o (Z, Y, X, C)
-        if arr.ndim == 3:
-            # Z, Y, X
-            arr = arr[:, None, :, :]
-            axes = 'ZCYX'
-        elif arr.ndim == 4:
-            # Ubicar canal como el menor eje
-            chan_axis = int(np.argmin(arr.shape))
-            if chan_axis != 1:
-                arr = np.moveaxis(arr, chan_axis, 1)
-            axes = None  # ya lo dejamos en (Z, C, Y, X) heurísticamente
-        else:
-            # Otras combinaciones (p.ej., T presente): tomamos primer T si existe
-            if arr.ndim == 5:
-                # Asumimos (T, Z, Y, X, C) o similares: tomar T=0
-                arr = arr[0]
-                if arr.ndim == 4:
-                    chan_axis = int(np.argmin(arr.shape))
-                    if chan_axis != 1:
-                        arr = np.moveaxis(arr, chan_axis, 1)
-                    axes = None
-                else:
-                    raise ValueError(f"Forma LIF no soportada: {arr.shape}")
-            else:
-                raise ValueError(f"Forma LIF no soportada: {arr.shape}")
-        return arr, axes
     else:
         raise ValueError(f"Extensión no soportada: {suffix}")
 
 
-def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose_path: Path | None = None, gfap_path: Path | None = None, final_path: Path | None = None, skeleton_path: Path | None = None):
+def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose_path: Path | None = None, gfap_path: Path | None = None, final_path: Path | None = None, skeleton_path: Path | None = None, rings_json: Path | None = None):
     image, axes = load_image_any(image_path)
     image = reorder_to_zcyx(image, axes)
 
@@ -145,6 +99,45 @@ def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose
             v.add_labels(skel, name="05 - Skeleton (labels)", scale=scale, visible=True)
         except Exception as e:
             print(f"Advertencia: no se pudo cargar Skeleton {skeleton_path}: {e}")
+    # Círculos de Sholl (Shapes 2D sobre planos Z dados)
+    if rings_json is not None and Path(rings_json).exists():
+        try:
+            import json as _json
+            data = _json.loads(Path(rings_json).read_text())
+            items = data.get("items", [])
+            shapes = []
+            for it in items:
+                z = int(it.get("z_index", 0))
+                cy = float(it.get("y_px", 0.0))
+                cx = float(it.get("x_px", 0.0))
+                radii = it.get("radii_px", [])
+                for r in radii:
+                    r = float(r)
+                    # polígono aproximando el círculo en el plano z
+                    theta = np.linspace(0, 2*np.pi, 64, endpoint=True)
+                    yy = cy + r * np.sin(theta)
+                    xx = cx + r * np.cos(theta)
+                    # Napari espera data como (N, D) con D=3 para 3D; fijamos z constante
+                    poly = np.stack([np.full_like(yy, z), yy, xx], axis=1)
+                    # Para 'path', repetir el primer punto al final para cerrar el anillo
+                    poly = np.concatenate([poly, poly[:1]], axis=0)
+                    shapes.append(poly)
+            if shapes:
+                # Usar 'path' en lugar de 'polygon' para evitar triangulación en 3D
+                # y errores al activar la vista 3D de napari.
+                v.add_shapes(
+                    shapes,
+                    shape_type='path',
+                    name='Sholl rings',
+                    edge_color='#FFFF00',  # hex color to avoid property lookup
+                    edge_width=1,
+                    face_color='transparent',
+                    scale=scale,  # alinear con imagen
+                    blending='translucent',
+                    opacity=0.7,
+                )
+        except Exception as e:
+            print(f"Advertencia: no se pudieron dibujar anillos de Sholl: {e}")
     napari.run()
 
 
@@ -159,6 +152,7 @@ if __name__ == "__main__":
     parser.add_argument("--gfap", type=str, required=False, help="Ruta a 03_gfap_microglia_filtered_mask.tif")
     parser.add_argument("--final", type=str, required=False, help="Ruta a 04_final_astrocytes_mask.tif")
     parser.add_argument("--skeleton", type=str, required=False, help="Ruta a 05_skeleton_labels.tif")
+    parser.add_argument("--rings", type=str, required=False, help="Ruta a JSON con anillos de Sholl")
     args = parser.parse_args()
 
     p = Path(args.path)
@@ -171,4 +165,5 @@ if __name__ == "__main__":
         Path(args.gfap) if args.gfap else None,
         Path(args.final) if args.final else None,
         Path(args.skeleton) if args.skeleton else None,
+        Path(args.rings) if args.rings else None,
     )

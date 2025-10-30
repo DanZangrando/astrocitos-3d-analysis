@@ -15,7 +15,7 @@ render_sidebar(show_calibration=True)
 # Desde streamlit/pages necesitamos subir dos niveles hasta la raíz del repo
 root = Path(__file__).resolve().parents[2]
 raw_dir = root / "data" / "raw"
-# Guardamos calibración global del experimento dentro de la app de Streamlit
+# Archivo unificado para calibración y parámetros globales
 overrides_path = root / "streamlit" / "calibration.json"
 napari_script = root / "streamlit" / "napari_viewer.py"
 
@@ -106,38 +106,57 @@ def read_calibration_from_tiff(tif_path: Path):
 
 
 def read_calibration_from_lif(lif_path: Path):
-    """Lee metadatos de un archivo Leica .lif usando readlif.
-    Devuelve (z_um, y_um, x_um) o None si no se encuentran.
+    """Lee metadatos de un archivo Leica .lif intentando múltiples APIs de readlif.
+    Devuelve (z_um, y_um, x_um) o (None, None, None) si no se encuentran.
     """
     z_um = y_um = x_um = None
+    # 1) API nueva: readlif.reader.LifFile
     try:
-        import readlif
-        rdr = readlif.Reader(str(lif_path))
-        # Tomamos la primera serie / imagen
+        from readlif.reader import LifFile  # type: ignore
+        lif = LifFile(str(lif_path))
+        # Intentar obtener escala desde el primer objeto imagen si estuviera disponible
         try:
-            series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else None
+            img0 = lif.get_image(0)
+            scale = getattr(img0, 'scale', None) or getattr(img0, 'scales', None)
         except Exception:
-            series_list = None
-        series0 = series_list[0] if series_list else None
-        scale = None
-        if series0 is not None:
-            scale = getattr(series0, 'scale', None)
-            if scale is None:
-                info = getattr(series0, 'info', None)
-                if isinstance(info, dict):
-                    scale = info.get('scale')
+            scale = None
         if scale is None:
-            # Fallback: algunas versiones exponen scale en la imagen directamente
-            try:
-                img0 = rdr.get_image(0)
-                scale = getattr(img0, 'scale', None)
-            except Exception:
-                pass
+            # Algunos exponen metadata en el propio LifFile
+            scale = getattr(lif, 'scale', None)
         if scale is not None and len(scale) >= 3:
-            # Se asume (Z, Y, X) en micrómetros
             z_um = float(scale[0]) if scale[0] is not None else None
             y_um = float(scale[1]) if scale[1] is not None else None
             x_um = float(scale[2]) if scale[2] is not None else None
+            return z_um, y_um, x_um
+    except Exception:
+        pass
+    # 2) API vieja: readlif.Reader
+    try:
+        import readlif  # type: ignore
+        if hasattr(readlif, 'Reader'):
+            rdr = readlif.Reader(str(lif_path))
+            try:
+                series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else None
+            except Exception:
+                series_list = None
+            series0 = series_list[0] if series_list else None
+            scale = None
+            if series0 is not None:
+                scale = getattr(series0, 'scale', None)
+                if scale is None:
+                    info = getattr(series0, 'info', None)
+                    if isinstance(info, dict):
+                        scale = info.get('scale')
+            if scale is None:
+                try:
+                    img0 = rdr.get_image(0)
+                    scale = getattr(img0, 'scale', None)
+                except Exception:
+                    pass
+            if scale is not None and len(scale) >= 3:
+                z_um = float(scale[0]) if scale[0] is not None else None
+                y_um = float(scale[1]) if scale[1] is not None else None
+                x_um = float(scale[2]) if scale[2] is not None else None
     except Exception:
         pass
     return z_um, y_um, x_um
@@ -146,48 +165,88 @@ def read_calibration_from_lif(lif_path: Path):
 def load_overrides():
     if overrides_path.exists():
         try:
-            return json.loads(overrides_path.read_text())  # formato: {"z":..,"y":..,"x":..}
+            return json.loads(overrides_path.read_text())  # Unificado: {"z","y","x", ...otros parámetros}
         except Exception:
             return {}
     return {}
 
 
 def save_override_global(z: float, y: float, x: float):
-    data = {"z": float(z), "y": float(y), "x": float(x)}
+    # Mantener cualquier otro parámetro ya guardado
+    cur = load_overrides() or {}
+    cur.update({"z": float(z), "y": float(y), "x": float(x)})
     overrides_path.parent.mkdir(parents=True, exist_ok=True)
-    overrides_path.write_text(json.dumps(data, indent=2))
+    overrides_path.write_text(json.dumps(cur, indent=2))
 
 
 # UI
 st.subheader("1) Selección de imagen")
 
-# Buscar imágenes en data/raw (.tif y .lif)
-files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.lif")])
-if not files:
-    st.warning("No se encontraron archivos .tif en data/raw.")
+all_tifs = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
+all_files = all_tifs
+if not all_files:
+    st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
     st.stop()
 
-labels = [str(p.relative_to(root)) for p in files]
-idx = st.selectbox("Elegí un preparado (.tif)", options=list(range(len(files))), format_func=lambda i: labels[i])
-img_path = files[idx]
+def _detect_group(p: Path) -> str:
+    try:
+        rel = str(p.relative_to(root)).lower()
+    except Exception:
+        rel = str(p).lower()
+    if "/hip/" in rel:
+        return "Hipoxia"
+    if "/ctl/" in rel:
+        return "CTL"
+    # Por defecto, asumimos CTL
+    return "CTL"
+
+groups = [_detect_group(p) for p in all_files]
+g_ctl = sum(1 for g in groups if g == "CTL")
+g_hip = sum(1 for g in groups if g == "Hipoxia")
+
+cc1, cc2 = st.columns(2)
+cc1.metric("Total de preparados (.tif/.tiff)", len(all_files))
+cc2.metric("CTL / Hipoxia", f"{g_ctl} / {g_hip}", help="Conteo por grupo principal")
+
+# Filtro por grupo
+# Filtro por grupo (unificado desde la barra lateral)
+group_filter = st.session_state.get("group_filter", "Todos")
+if group_filter == "Todos":
+    files_avail = all_files
+else:
+    files_avail = [p for p in all_files if _detect_group(p) == group_filter]
+if not files_avail:
+    st.info("No hay preparados para el grupo seleccionado.")
+    st.stop()
+
+# Buscar imágenes en data/raw (.tif/.tiff)
+labels = [str(p.relative_to(root)) for p in files_avail]
+idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))), format_func=lambda i: labels[i])
+img_path = files_avail[idx]
+sel_group = _detect_group(img_path)
+def _group_badge_html(group: str) -> str:
+    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
+st.markdown(_group_badge_html(sel_group), unsafe_allow_html=True)
 
 st.subheader("2) Calibración física global del experimento (µm)")
 
 # Valores detectados
-suffix = img_path.suffix.lower()
-if suffix == '.lif':
-    z_det, y_det, x_det = read_calibration_from_lif(img_path)
-else:
-    z_det, y_det, x_det = read_calibration_from_tiff(img_path)
+z_det, y_det, x_det = read_calibration_from_tiff(img_path)
 ov = load_overrides() or {}
 
 col1, col2 = st.columns(2)
 with col1:
     st.write("Valores detectados (solo lectura) en la imagen seleccionada:")
     st.json({"detected": {"z": z_det, "y": y_det, "x": x_det}})
+    # Indicadores rápidos
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Z detectado", f"{z_det:.4f} µm" if z_det else "—")
+    mc2.metric("Y detectado", f"{y_det:.4f} µm" if y_det else "—")
+    mc3.metric("X detectado", f"{x_det:.4f} µm" if x_det else "—")
     # Sugerencia si Y/X parecen 1.0: recomendar 0.3 µm
-    if (y_det is None or abs(y_det - 1.0) < 1e-6) or (x_det is None or abs(x_det - 1.0) < 1e-6):
-        st.warning("No se detectó calibración fiable en Y/X (1.0 µm). Para este experimento suele ser ~0.3 µm. Ajustá abajo y guardá.")
+    if (y_det is None or (isinstance(y_det, (int,float)) and abs(y_det - 1.0) < 1e-6)) or (x_det is None or (isinstance(x_det, (int,float)) and abs(x_det - 1.0) < 1e-6)):
+        st.warning("No se detectó calibración fiable en Y/X (≈1.0 µm). Para este experimento suele ser ~0.3 µm. Ajustá abajo y guardá.")
 with col2:
     st.write("Ingresá/ajustá la calibración global a usar en todo el experimento:")
     z_in = st.number_input("Z (µm)", value=float(ov.get('z', z_det or 1.0)), min_value=0.0001, step=0.01, format="%0.4f")
@@ -206,10 +265,11 @@ with open_col:
         env = os.environ.copy()
         cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z_in), "--y", str(y_in), "--x", str(x_in)]
         try:
+            env["NAPARI_DISABLE_PLUGIN_AUTOLOAD"] = "1"
             subprocess.Popen(cmd, env=env)
             st.info("Napari lanzado en una ventana separada.")
         except Exception as e:
             st.error(f"No se pudo lanzar Napari: {e}")
 
 st.markdown("---")
-st.caption("Tip: Si tus TIFFs no traen metadatos físicos, usá esta página para fijar Y y X (por ejemplo 0.3 µm) además de Z.")
+st.caption("Tip: Si tus archivos no traen metadatos físicos confiables, usá esta página para fijar Y y X (por ejemplo 0.3 µm) además de Z. Los indicadores arriba te muestran si los metadatos fueron detectados correctamente.")

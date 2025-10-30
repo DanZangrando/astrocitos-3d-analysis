@@ -63,43 +63,6 @@ def load_image_any(path: Path):
             axes = getattr(series, 'axes', None)
             arr = series.asarray()
         return arr, axes
-    elif suffix == '.lif':
-        import readlif
-        rdr = readlif.Reader(str(path))
-        try:
-            img0 = rdr.get_image(0)
-            arr = np.asarray(img0)
-        except Exception:
-            series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else []
-            if series_list:
-                s0 = series_list[0]
-                try:
-                    arr = np.asarray(s0)
-                except Exception as e:
-                    raise RuntimeError(f"No se pudo leer la primera serie del LIF: {e}")
-            else:
-                raise RuntimeError("No se encontraron series en el LIF")
-
-        if arr.ndim == 3:  # Z,Y,X
-            arr = arr[:, None, :, :]
-            axes = 'ZCYX'
-        elif arr.ndim == 4:
-            chan_axis = int(np.argmin(arr.shape))
-            if chan_axis != 1:
-                arr = np.moveaxis(arr, chan_axis, 1)
-            axes = None
-        elif arr.ndim == 5:
-            arr = arr[0]
-            if arr.ndim == 4:
-                chan_axis = int(np.argmin(arr.shape))
-                if chan_axis != 1:
-                    arr = np.moveaxis(arr, chan_axis, 1)
-                axes = None
-            else:
-                raise ValueError(f"Forma LIF no soportada: {arr.shape}")
-        else:
-            raise ValueError(f"Forma LIF no soportada: {arr.shape}")
-        return arr, axes
     else:
         raise ValueError(f"Extensión no soportada: {suffix}")
 
@@ -115,41 +78,72 @@ def existing_results(out_dir: Path) -> dict:
     return {
         "cellpose": (out_dir / "02_cellpose_mask.tif").exists(),
         "gfap_filtered": (out_dir / "03_gfap_microglia_filtered_mask.tif").exists(),
-        "params": (out_dir / "params.json").exists(),
     }
 
 
-def save_params(out_dir: Path, updates: dict):
-    p = out_dir / "params.json"
-    cur = {}
-    if p.exists():
-        try:
-            cur = json.loads(p.read_text())
-        except Exception:
-            cur = {}
-    cur.update(updates)
-    p.write_text(json.dumps(cur, indent=2))
-
-
 # --------- 1) Selección de imagen ---------
-files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.lif")])
+files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
 if not files:
-    st.warning("No se encontraron archivos .tif/.lif en data/raw.")
+    st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
     st.stop()
 
-labels = [str(p.relative_to(root)) for p in files]
-idx = st.selectbox("Elegí un preparado", options=list(range(len(files))), format_func=lambda i: labels[i])
-img_path = files[idx]
+def _detect_group(p: Path, root: Path) -> str:
+    try:
+        rel = str(p.relative_to(root)).lower()
+    except Exception:
+        rel = str(p).lower()
+    if "/hip/" in rel:
+        return "Hipoxia"
+    if "/ctl/" in rel:
+        return "CTL"
+    return "CTL"
+
+# Filtro por grupo (unificado desde sidebar)
+group_filter = st.session_state.get("group_filter", "Todos")
+if group_filter == "Todos":
+    files_avail = files
+else:
+    files_avail = [p for p in files if _detect_group(p, root) == group_filter]
+if not files_avail:
+    st.info("No hay preparados para el grupo seleccionado.")
+    st.stop()
+
+labels = [str(p.relative_to(root)) for p in files_avail]
+idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))), format_func=lambda i: labels[i])
+img_path = files_avail[idx]
 out_dir = get_output_dir_for_image(img_path)
 status = existing_results(out_dir)
+
+group = _detect_group(img_path, root)
 
 st.markdown("### Estado de resultados guardados")
 st.write({
     "cellpose_mask": status["cellpose"],
     "gfap_filtered_mask": status["gfap_filtered"],
-    "params_json": status["params"],
     "output_dir": str(out_dir.relative_to(root)),
 })
+def _group_badge_html(group: str) -> str:
+    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
+st.markdown(_group_badge_html(group), unsafe_allow_html=True)
+
+# --------- Recalcular por ámbito desde este paso ---------
+with st.expander("Recalcular por ámbito desde este paso", expanded=False):
+    scope = st.radio("Ámbito", options=["Preparado seleccionado", "Grupo", "Todos"], horizontal=True, key="p03_scope")
+    scope_group = None
+    if scope == "Grupo":
+        scope_group = st.selectbox("Grupo", options=["CTL","Hipoxia"], index=0, key="p03_scope_group")
+    if st.button("▶️ Recalcular (desde 03)", key="p03_recalc"):
+        try:
+            from ui.runner import run_scope, read_calibration
+            cal = read_calibration(root/"streamlit"/"calibration.json")
+            sc = "selected" if scope=="Preparado seleccionado" else ("group" if scope=="Grupo" else "all")
+            sel = img_path if sc=="selected" else None
+            res = run_scope(root, scope=sc, start_step="03", cal=cal, selected=sel, group=scope_group, overwrite_from_step=True)
+            ok = sum(1 for _, stt in res if not stt.get("error"))
+            st.success(f"Listo: {ok}/{len(res)} preparados procesados desde 03.")
+        except Exception as e:
+            st.error(f"Error al ejecutar: {e}")
 
 
 # --------- 2) Canales y parámetros ---------
@@ -159,40 +153,52 @@ n_channels = vol_prev.shape[1]
 
 st.markdown("### Selección de canales")
 cc1, cc2 = st.columns(2)
+cal = _read_global_calibration()
 with cc1:
-    gfap_idx = st.number_input("Índice de canal GFAP", value=1 if n_channels > 1 else 0, min_value=0, max_value=max(0, n_channels-1), step=1)
+    gfap_default = int(cal.get("GFAP_CHANNEL_INDEX", 1 if n_channels > 1 else 0))
+    gfap_default = min(max(0, gfap_default), max(0, n_channels-1))
+    gfap_idx = st.number_input("Índice de canal GFAP", value=int(gfap_default), min_value=0, max_value=max(0, n_channels-1), step=1)
 with cc2:
-    micro_idx = st.number_input("Índice de canal Microglía", value=2 if n_channels > 2 else min(1, n_channels-1), min_value=0, max_value=max(0, n_channels-1), step=1)
+    micro_default = int(cal.get("MICROGLIA_CHANNEL_INDEX", 2 if n_channels > 2 else min(1, n_channels-1)))
+    micro_default = min(max(0, micro_default), max(0, n_channels-1))
+    micro_idx = st.number_input("Índice de canal Microglía", value=int(micro_default), min_value=0, max_value=max(0, n_channels-1), step=1)
 
 st.markdown("### Parámetros de filtrado (GFAP / Microglía)")
 fcol1, fcol2, fcol3 = st.columns(3)
 with fcol1:
-    max_dilation_iterations = st.number_input("Iteraciones máximo del anillo", value=10, min_value=1, step=1)
+    max_dilation_iterations = st.number_input("Iteraciones máximo del anillo", value=int(cal.get("MAX_DILATION_ITERATIONS", 10)), min_value=1, step=1)
 with fcol2:
-    gfap_intensity_threshold = st.number_input("Umbral GFAP (intensidad)", value=40, min_value=0, step=1)
+    gfap_intensity_threshold = st.number_input("Umbral GFAP (intensidad)", value=int(cal.get("GFAP_INTENSITY_THRESHOLD", 40)), min_value=0, step=1)
 with fcol3:
-    microglia_intensity_threshold = st.number_input("Umbral Microglía (intensidad)", value=200, min_value=0, step=1)
+    microglia_intensity_threshold = st.number_input("Umbral Microglía (intensidad)", value=int(cal.get("MICROGLIA_INTENSITY_THRESHOLD", 200)), min_value=0, step=1)
 
 # --- Parámetros de tamaño (volumen) ---
 st.markdown("### Filtro por tamaño (volumen físico)")
 vcol1, vcol2 = st.columns(2)
 with vcol1:
-    min_volume_um3 = st.number_input("Volumen mínimo (µm³)", value=75, min_value=0, step=1)
+    min_volume_um3 = st.number_input("Volumen mínimo (µm³)", value=int(cal.get("MIN_VOLUME_UM3", 75)), min_value=0, step=1)
 with vcol2:
     apply_size_after_filter = st.checkbox("Aplicar filtro de volumen tras GFAP/Microglía", value=True)
 
 save_experiment_params = st.button("💾 Guardar parámetros del experimento (sidebar)")
 if save_experiment_params:
-    exp_params_path = root / "streamlit" / "experiment_params.json"
-    exp = {
+    # Unificar parámetros globales en streamlit/calibration.json
+    calib_all_path = root / "streamlit" / "calibration.json"
+    cur = {}
+    if calib_all_path.exists():
+        try:
+            cur = json.loads(calib_all_path.read_text())
+        except Exception:
+            cur = {}
+    cur.update({
         "MAX_DILATION_ITERATIONS": int(max_dilation_iterations),
         "GFAP_INTENSITY_THRESHOLD": int(gfap_intensity_threshold),
         "MICROGLIA_INTENSITY_THRESHOLD": int(microglia_intensity_threshold),
         "MIN_VOLUME_UM3": int(min_volume_um3),
-    }
-    exp_params_path.parent.mkdir(parents=True, exist_ok=True)
-    exp_params_path.write_text(json.dumps(exp, indent=2))
-    st.success(f"Parámetros del experimento guardados en {exp_params_path.relative_to(root)}")
+    })
+    calib_all_path.parent.mkdir(parents=True, exist_ok=True)
+    calib_all_path.write_text(json.dumps(cur, indent=2))
+    st.success(f"Parámetros del experimento guardados en {calib_all_path.relative_to(root)}")
 
 
 # --------- 3) Lógica de filtrado ---------
@@ -230,12 +236,6 @@ def compute_and_save_filtering(cellpose_masks: np.ndarray, gfap_channel: np.ndar
 
     gfap_filtered_mask = np.where(np.isin(cellpose_masks, astrocyte_labels_candidate), cellpose_masks, 0)
     tifffile.imwrite(out_dir / "03_gfap_microglia_filtered_mask.tif", gfap_filtered_mask.astype(np.uint16))
-    save_params(out_dir, {
-        "MAX_DILATION_ITERATIONS": int(max_dilation_iterations),
-        "GFAP_INTENSITY_THRESHOLD": int(gfap_intensity_threshold),
-        "MICROGLIA_INTENSITY_THRESHOLD": int(microglia_intensity_threshold),
-        "candidates_after_filter": len(astrocyte_labels_candidate)
-    })
     st.success(f"Máscara filtrada guardada (03_gfap_microglia_filtered_mask.tif). {len(astrocyte_labels_candidate)} candidatos retenidos.")
     return gfap_filtered_mask
 
@@ -260,11 +260,6 @@ def apply_size_filter_and_save(gfap_filtered_mask: np.ndarray, min_volume_um3: f
     kept = [p.label for p in props if p.area >= min_voxels]
     final_mask = np.where(np.isin(gfap_filtered_mask, kept), gfap_filtered_mask, 0)
     tifffile.imwrite(out_dir / "04_final_astrocytes_mask.tif", final_mask.astype(np.uint16))
-    save_params(out_dir, {
-        "MIN_VOLUME_UM3": float(min_volume_um3),
-        "MIN_VOLUME_VOXELS": int(min_voxels),
-        "final_astrocyte_count": int(len(kept)),
-    })
     st.success(f"Máscara final guardada (04_final_astrocytes_mask.tif). Objetos finales: {len(kept)}")
     return final_mask
 
@@ -421,16 +416,22 @@ def render_metrics_section():
 
     n_cellpose, n_gfap, n_final = _compute_counts(cellpose_masks, gfap_mask, final_mask)
 
-    # Métricas numéricas
+    # Tasas de retención
+    ret_gfap = (n_gfap / n_cellpose * 100.0) if n_cellpose else 0.0
+    ret_final = (n_final / n_cellpose * 100.0) if n_cellpose else 0.0
+    drop_final = n_cellpose - n_final
+
+    # Métricas numéricas con porcentajes
     mcol1, mcol2, mcol3 = st.columns(3)
     mcol1.metric("Núcleos tras Cellpose", n_cellpose)
-    mcol2.metric("Candidatos GFAP/Microglía", n_gfap)
-    mcol3.metric("Astrocitos finales", n_final)
+    mcol2.metric("Candidatos GFAP/Microglía", n_gfap, delta=f"{ret_gfap:.1f}% retenidos")
+    mcol3.metric("Astrocitos finales", n_final, delta=f"−{drop_final}" if drop_final>0 else None)
 
     # Gráfico de barras del pipeline
     chart_df = pd.DataFrame({
         "Etapa": ["Cellpose", "GFAP/Microglía", "Final (Volumen)"],
         "Cantidad": [n_cellpose, n_gfap, n_final],
+        "Retención %": [100.0, ret_gfap, ret_final],
     })
     bar = alt.Chart(chart_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
         x=alt.X("Etapa:N", sort=None),
@@ -439,6 +440,14 @@ def render_metrics_section():
         tooltip=["Etapa", "Cantidad"],
     ).properties(height=220)
     st.altair_chart(bar, use_container_width=True)
+
+    # Línea de retención (%)
+    line = alt.Chart(chart_df).mark_line(point=alt.OverlayMarkDef(size=80, filled=True)).encode(
+        x=alt.X("Etapa:N", sort=None),
+        y=alt.Y("Retención %:Q", scale=alt.Scale(domain=[0,100])),
+        tooltip=["Etapa", alt.Tooltip("Retención %:Q", format=".1f")],
+    ).properties(height=220)
+    st.altair_chart(line, use_container_width=True)
 
     # Tabla por núcleo
     df = _compute_table(cellpose_masks, gfap_mask, final_mask)
@@ -457,4 +466,4 @@ if refresh or st.session_state.get("__refresh_metrics", False):
 
 
 st.markdown("---")
-st.caption("Esta página genera 03_gfap_microglia_filtered_mask.tif en data/processed/<preparado>/. Los parámetros también pueden guardarse globalmente para mostrarlos en el sidebar.")
+st.caption("Esta página genera 03_gfap_microglia_filtered_mask.tif en data/processed/<preparado>/. Los parámetros se gestionan SIEMPRE en calibration.json para asegurar reproducibilidad.")
