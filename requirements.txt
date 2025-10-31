@@ -10,6 +10,9 @@ scikit-image>=0.22
 skan>=0.13
 tifffile>=2023.2
 altair>=5.0
+vl-convert-python>=1.6.0
+altair_saver>=0.5.0
+kaleido>=0.2.1
 cellpose>=3.0
 napari>=0.6
 beautifulsoup4==4.13.5

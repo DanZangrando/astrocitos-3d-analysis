@@ -414,17 +414,57 @@ def run_advanced_skeleton_and_save(
                     sk = Skeleton(vox_thin.astype(np.uint8), spacing=(z_um, y_um, x_um))
                     dfb = sk_summarize(sk, separator="_")
                     if dfb is not None and not dfb.empty:
-                        dist = dfb["branch-distance"].to_numpy()
-                        keep = dist >= float(prune_min_len_um)
-                        total_len_um = float(np.nansum(dist[keep])) if keep.size else float(np.nansum(dist))
-                        n_branches = int(np.count_nonzero(keep)) if keep.size else int(dfb.shape[0])
-                        mean_branch_len_um = float(np.nanmean(dist[keep])) if np.any(keep) else (float(np.nanmean(dist)) if dist.size else np.nan)
+                        # Helper: try multiple possible column names for branch length and branch type
+                        def _try_get_series(dframe, candidates):
+                            for c in candidates:
+                                if c in dframe.columns:
+                                    return dframe[c].to_numpy(), c
+                            # fallback: try to find a column that looks like a branch-length column
+                            for c in dframe.columns:
+                                low = str(c).lower()
+                                if "branch" in low and ("dist" in low or "length" in low):
+                                    return dframe[c].to_numpy(), c
+                            return np.array([], dtype=float), None
+
+                        dist, dist_col = _try_get_series(dfb, ["branch-distance", "branch_distance", "branch_dist", "branch_length", "branch_length_um"])
+                        keep = (dist >= float(prune_min_len_um)) if dist.size else np.array([], dtype=bool)
+                        # If we have distances, sum them; otherwise fallback to voxel-count-based estimate
+                        if dist.size:
+                            total_len_um = float(np.nansum(dist[keep])) if keep.size else float(np.nansum(dist))
+                            n_branches = int(np.count_nonzero(keep)) if keep.size else int(dfb.shape[0])
+                            mean_branch_len_um = float(np.nanmean(dist[keep])) if np.any(keep) else (float(np.nanmean(dist)) if dist.size else np.nan)
+                        else:
+                            # fallback: estimate from voxels in the original binary mask for this label
+                            try:
+                                vox_count = int(np.count_nonzero(vox))
+                            except Exception:
+                                vox_count = 0
+                            total_len_um = float(vox_count) * float(target_iso_um)
+                            n_branches = int(dfb.shape[0]) if dfb is not None else 0
+                            mean_branch_len_um = float(total_len_um / n_branches) if n_branches else np.nan
+
                         endpoints = None; junctions = None
-                        if "branch-type" in dfb.columns:
-                            bt = dfb["branch-type"].to_numpy()
-                            endpoints = int(np.count_nonzero((bt == 1) & keep)) if keep.size else int(np.count_nonzero(bt == 1))
-                            junctions = int(np.count_nonzero((bt >= 2) & keep)) if keep.size else int(np.count_nonzero(bt >= 2))
-                        density = (n_branches / total_len_um * 100.0) if (n_branches and total_len_um and total_len_um > 0) else np.nan
+                        bt, bt_col = _try_get_series(dfb, ["branch-type", "branch_type", "branch_type_id"])
+                        if bt is not None and bt.size:
+                            if keep.size:
+                                endpoints = int(np.count_nonzero((bt == 1) & keep))
+                                junctions = int(np.count_nonzero((bt >= 2) & keep))
+                            else:
+                                endpoints = int(np.count_nonzero(bt == 1))
+                                junctions = int(np.count_nonzero(bt >= 2))
+
+                        if total_len_um and total_len_um > 0 and n_branches:
+                            density = (n_branches / total_len_um * 100.0)
+                        else:
+                            density = np.nan
+
+                        # If expected columns were missing, log available columns for debugging
+                        if dist_col is None or bt_col is None:
+                            try:
+                                print(f"[skan] label={lab}: available columns: {list(dfb.columns)}")
+                            except Exception:
+                                pass
+
                         rows.append({
                             "label": int(lab),
                             "total_length_um": float(total_len_um),

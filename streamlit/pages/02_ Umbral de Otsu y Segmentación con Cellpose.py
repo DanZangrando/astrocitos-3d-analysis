@@ -1,94 +1,49 @@
 import sys
 import os
 import json
-import subprocess
+import subprocess # <--- CORRECCIÓN
 from pathlib import Path
 import numpy as np
 import streamlit as st
 import tifffile
-from skimage.filters import threshold_otsu
 from ui.sidebar import render_sidebar
+# --- Importar la lógica unificada ---
+from ui import pipeline, runner
 
-
-# --------- Configuración de página y UI ---------
+# --- Configuración de página y UI ---
 st.title("Umbral de Otsu y Segmentación con Cellpose")
 render_sidebar(show_calibration=True)
 
-
-# --------- Rutas base ---------
+# --- Rutas base ---
 root = Path(__file__).resolve().parents[2]  # /<repo>
 raw_dir = root / "data" / "raw"
 calib_path = root / "streamlit" / "calibration.json"
 napari_script = root / "streamlit" / "napari_viewer.py"
 
-
-# --------- Utilidades ---------
+# --- Utilidades ---
 def _read_global_calibration():
     if calib_path.exists():
         try:
-            return json.loads(calib_path.read_text())  # Unificado: metadatos físicos + parámetros globales
+            return json.loads(calib_path.read_text())
         except Exception:
             pass
     return {}
 
-
-def reorder_to_zcyx(arr: np.ndarray, axes: str | None):
-    """Reordena un array con ejes reportados a (Z, C, Y, X)."""
-    if axes is None:
-        if arr.ndim != 4:
-            raise ValueError(f"Forma inesperada sin ejes: {arr.shape}")
-        chan_axis = int(np.argmin(arr.shape))
-        if chan_axis != 1:
-            arr = np.moveaxis(arr, chan_axis, 1)
-        return arr
-    ax_list = list(axes)
-    # Seleccionar T=0 si existe
-    if 'T' in ax_list:
-        t_idx = ax_list.index('T')
-        arr = np.take(arr, indices=0, axis=t_idx)
-        ax_list.pop(t_idx)
-    if 'C' not in ax_list:
-        arr = np.expand_dims(arr, axis=0)
-        ax_list = ['C'] + ax_list
-    needed = ['Z', 'C', 'Y', 'X']
-    if not all(a in ax_list for a in needed):
-        raise ValueError(f"Ejes insuficientes tras seleccionar T=0: {ax_list} (se requieren Z,C,Y,X)")
-    src_order = [ax_list.index(a) for a in needed]
-    return np.transpose(arr, axes=src_order)
-
-
-def load_image_any(path: Path):
-    """Carga .tif/.tiff con tifffile y devuelve (array, axes str or None)."""
-    suffix = path.suffix.lower()
-    if suffix in ('.tif', '.tiff'):
-        with tifffile.TiffFile(str(path)) as tf:
-            series = tf.series[0]
-            axes = getattr(series, 'axes', None)
-            arr = series.asarray()
-        return arr, axes
-    else:
-        raise ValueError(f"Extensión no soportada: {suffix}")
-
+def _save_global_calibration(cal_data: dict):
+    calib_path.parent.mkdir(parents=True, exist_ok=True)
+    calib_path.write_text(json.dumps(cal_data, indent=2))
 
 def get_output_dir_for_image(img_path: Path) -> Path:
-    base_name = img_path.stem  # p.ej.: "Inmuno 26-07-23.lif - CTL 1-2 a"
+    base_name = img_path.stem
     out_dir = root / "data" / "processed" / base_name
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
-
 
 def existing_results(out_dir: Path) -> dict:
     return {
         "otsu": (out_dir / "01_otsu_mask.tif").exists(),
         "cellpose": (out_dir / "02_cellpose_mask.tif").exists(),
     }
-
-
-# --------- 1) Selección de imagen ---------
-files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
-if not files:
-    st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
-    st.stop()
 
 def _detect_group(p: Path, root: Path) -> str:
     try:
@@ -101,7 +56,12 @@ def _detect_group(p: Path, root: Path) -> str:
         return "CTL"
     return "CTL"
 
-# Filtro por grupo (unificado desde la barra lateral)
+# --- 1) Selección de imagen ---
+files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
+if not files:
+    st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
+    st.stop()
+
 group_filter = st.session_state.get("group_filter", "Todos")
 if group_filter == "Todos":
     files_avail = files
@@ -116,180 +76,126 @@ idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))),
 img_path = files_avail[idx]
 out_dir = get_output_dir_for_image(img_path)
 status = existing_results(out_dir)
-
 group = _detect_group(img_path, root)
+glob_calib = _read_global_calibration()
 
+# --- Resumen Rápido ---
 st.markdown("### Resumen rápido")
-# Cargar métricas si existen
-otsu_frac = None
-cp_count = None
+otsu_frac, cp_count = None, None
 try:
-    if (out_dir / "01_otsu_mask.tif").exists():
+    if status["otsu"]:
         otsu_mask = tifffile.imread(out_dir / "01_otsu_mask.tif").astype(bool)
         otsu_frac = float(otsu_mask.mean()) if otsu_mask.size else 0.0
-    if (out_dir / "02_cellpose_mask.tif").exists():
+    if status["cellpose"]:
         cp_mask = tifffile.imread(out_dir / "02_cellpose_mask.tif")
         cp_count = int(cp_mask.max())
 except Exception:
     pass
 
 m1, m2 = st.columns(2)
-m1.metric("Otsu calculado", "Sí" if status["otsu"] else "No")
-m2.metric("Cellpose calculado", "Sí" if status["cellpose"] else "No")
-
-if status["otsu"] or status["cellpose"]:
-    s1, s2 = st.columns(2)
-    s1.metric("Fracción voxeles Otsu", f"{100*otsu_frac:.1f}%" if isinstance(otsu_frac, (int,float)) else "—")
-    s2.metric("Núcleos Cellpose", cp_count if isinstance(cp_count, int) else "—")
+m1.metric("Otsu calculado", "✅ Sí" if status["otsu"] else "❌ No")
+m2.metric("Cellpose calculado", "✅ Sí" if status["cellpose"] else "❌ No")
+s1, s2 = st.columns(2)
+s1.metric("Fracción voxeles Otsu", f"{100*otsu_frac:.1f}%" if isinstance(otsu_frac, (int,float)) else "—")
+s2.metric("Núcleos Cellpose", cp_count if isinstance(cp_count, int) else "—")
 
 def _group_badge_html(group: str) -> str:
     color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
-
 st.markdown(_group_badge_html(group) + f"&nbsp;· Directorio: {out_dir.relative_to(root)}", unsafe_allow_html=True)
 
-# --------- Recalcular por ámbito desde este paso ---------
-with st.expander("Recalcular por ámbito desde este paso", expanded=False):
-    scope = st.radio("Ámbito", options=["Preparado seleccionado", "Grupo", "Todos"], horizontal=True, key="p02_scope")
+# --- Recalcular por ámbito (Usa runner) ---
+with st.expander("Recalcular por ámbito (Batch)", expanded=False):
+    scope = st.radio("Ámbito", options=["Grupo", "Todos"], horizontal=True, key="p02_scope")
     scope_group = None
     if scope == "Grupo":
         scope_group = st.selectbox("Grupo", options=["CTL","Hipoxia"], index=0, key="p02_scope_group")
     include_otsu = st.checkbox("Incluir Otsu (recalcular desde 01)", value=True, key="p02_inc_otsu")
     if st.button("▶️ Recalcular", key="p02_recalc"):
-        try:
-            from ui.runner import run_scope, read_calibration
-            cal = read_calibration(root/"streamlit"/"calibration.json")
-            start = "01" if include_otsu else "02"
-            sc = "selected" if scope=="Preparado seleccionado" else ("group" if scope=="Grupo" else "all")
-            sel = img_path if sc=="selected" else None
-            res = run_scope(root, scope=sc, start_step=start, cal=cal, selected=sel, group=scope_group, overwrite_from_step=True)
-            ok = sum(1 for _, stt in res if not stt.get("error"))
-            st.success(f"Listo: {ok}/{len(res)} preparados procesados desde {start}.")
-        except Exception as e:
-            st.error(f"Error al ejecutar: {e}")
+        start = "01" if include_otsu else "02"
+        sc = "group" if scope=="Grupo" else "all"
+        res = runner.run_scope(root, scope=sc, start_step=start, cal=glob_calib, selected=None, group=scope_group, overwrite_from_step=True)
+        ok = sum(1 for _, stt in res if not stt.get("error"))
+        st.success(f"Listo: {ok}/{len(res)} preparados procesados desde {start}.")
 
-
-# --------- 2) Calibración global (solo informativo) ---------
-glob_calib = _read_global_calibration()
-if glob_calib:
-    st.caption(f"Calibración global activa (µm): Z={glob_calib.get('z')}, Y={glob_calib.get('y')}, X={glob_calib.get('x')}")
-else:
-    st.warning("No hay calibración global guardada en streamlit/calibration.json. Continuamos igualmente para Otsu/Cellpose.")
-
-
-# --------- 3) Configuración de segmentación ---------
+# --- 3) Configuración de segmentación ---
 st.markdown("### Parámetros de Segmentación")
+n_channels = 1
+try:
+    arr_preview, axes_prev = pipeline.load_image_any(img_path)
+    vol_prev = pipeline.reorder_to_zcyx(arr_preview, axes_prev)
+    n_channels = vol_prev.shape[1]
+except Exception as e:
+    st.warning(f"No se pudo precargar la imagen: {e}")
+
 colp1, colp2, colp3 = st.columns(3)
+dapi_default = int(glob_calib.get("DAPI_CHANNEL_INDEX", 0))
+dapi_default = min(max(0, dapi_default), max(0, n_channels-1))
 with colp1:
-    nucleus_diameter = st.number_input("Diámetro de núcleo (px)", value=30, min_value=5, step=1)
+    dapi_channel_index = st.number_input("Índice de canal DAPI (0=primero)", value=dapi_default, min_value=0, max_value=max(0, n_channels-1), step=1)
 with colp2:
-    dapi_channel_index = st.number_input("Índice de canal DAPI (0=primero)", value=0, min_value=0, step=1)
+    nucleus_diameter = st.number_input("Diámetro de núcleo (px)", value=int(glob_calib.get("NUCLEUS_DIAMETER", 30)), min_value=5, step=1)
 with colp3:
-    use_gpu = st.checkbox("Usar GPU si está disponible", value=True)
+    use_gpu = st.checkbox("Usar GPU si está disponible", value=bool(glob_calib.get("CELLPOSE_USE_GPU", True)))
 
-
-# --------- 4) Acciones ---------
-st.markdown("### Acciones")
+# --- 4) Acciones (REFACTORIZADAS) ---
+st.markdown("### Acciones (Para el preparado actual)")
 recompute_otsu = st.checkbox("Forzar recalcular Otsu (sobrescribir si existe)", value=False)
 recompute_cellpose = st.checkbox("Forzar recalcular Cellpose (sobrescribir si existe)", value=False)
 
 run_otsu = st.button("🧮 Ejecutar Otsu y Guardar")
 run_cellpose = st.button("🧠 Ejecutar Cellpose y Guardar")
 run_both = st.button("🚀 Ejecutar Otsu + Cellpose")
+
+def update_calib_and_run(start_step: runner.Step, overwrite: bool):
+    """Guarda los parámetros de la UI y luego ejecuta el runner."""
+    glob_calib["DAPI_CHANNEL_INDEX"] = int(dapi_channel_index)
+    glob_calib["NUCLEUS_DIAMETER"] = int(nucleus_diameter)
+    glob_calib["CELLPOSE_USE_GPU"] = bool(use_gpu)
+    _save_global_calibration(glob_calib)
+    st.info("Parámetros de UI guardados en calibration.json")
+    
+    try:
+        with st.spinner(f"Ejecutando pipeline desde el paso {start_step} para {img_path.stem}..."):
+            runner.run_pipeline_for(
+                root=root,
+                img_path=img_path,
+                cal=glob_calib,
+                start_step=start_step,
+                overwrite_from_step=overwrite
+            )
+        st.success(f"Paso {start_step} completado.")
+        st.rerun() # Recargar para mostrar nuevo estado
+    except Exception as e:
+        st.error(f"Error en pipeline: {e}")
+        st.exception(e)
+
+if run_otsu:
+    update_calib_and_run(start_step="01", overwrite=recompute_otsu)
+
+if run_cellpose:
+    update_calib_and_run(start_step="02", overwrite=recompute_cellpose)
+
+if run_both:
+    # "Run both" siempre sobrescribe 01, y luego 02 si es necesario
+    update_calib_and_run(start_step="01", overwrite=True)
+
+
+# --- 5) Ver en Napari (Corregido) ---
+st.markdown("---")
 open_napari_image = st.button("👁️ Abrir en Napari (solo imagen)")
 open_napari_with_masks = st.button("🧪 Abrir en Napari con máscaras disponibles")
 
-
-def compute_and_save_otsu(dapi_vol: np.ndarray, out_dir: Path):
-    st.write("Calculando umbral de Otsu...")
-    thr = threshold_otsu(dapi_vol)
-    otsu_mask = (dapi_vol > thr)
-    tifffile.imwrite(out_dir / "01_otsu_mask.tif", otsu_mask.astype(np.uint8))
-    st.success("Máscara de Otsu guardada (01_otsu_mask.tif)")
-    st.info(f"Umbral Otsu: {thr:.1f} | Fracción en máscara: {100*otsu_mask.mean():.1f}%")
-    return otsu_mask
-
-
-def compute_and_save_cellpose(dapi_vol_clean: np.ndarray, out_dir: Path):
-    from cellpose import models
-    st.write("Cargando modelo Cellpose...")
-    try:
-        model = models.CellposeModel(gpu=use_gpu)
-    except Exception:
-        st.warning("No se pudo inicializar GPU; se usará CPU.")
-        model = models.CellposeModel(gpu=False)
-
-    st.write("Ejecutando segmentación 3D con Cellpose...")
-    masks, _, _ = model.eval(
-        dapi_vol_clean,
-        diameter=int(nucleus_diameter),
-        z_axis=0,
-        do_3D=True,
-    )
-    tifffile.imwrite(out_dir / "02_cellpose_mask.tif", masks.astype(np.uint16))
-    st.success("Máscara de Cellpose guardada (02_cellpose_mask.tif)")
-    return masks
-
-
-def load_image_and_get_dapi():
-    arr, axes = load_image_any(img_path)
-    vol = reorder_to_zcyx(arr, axes)  # Z,C,Y,X
-    if dapi_channel_index >= vol.shape[1]:
-        raise IndexError(f"Índice de canal DAPI={dapi_channel_index} fuera de rango (n_canales={vol.shape[1]})")
-    dapi = vol[:, int(dapi_channel_index), :, :]
-    return dapi
-
-
-if run_otsu or run_both:
-    try:
-        dapi_vol = load_image_and_get_dapi()
-        if status["otsu"] and not recompute_otsu:
-            st.info("Ya existe 01_otsu_mask.tif. Marca 'Forzar recalcular' para sobrescribir.")
-        else:
-            with st.spinner("Calculando Otsu..."):
-                compute_and_save_otsu(dapi_vol, out_dir)
-    except Exception as e:
-        st.error(f"Error en Otsu: {e}")
-
-
-if run_cellpose or run_both:
-    try:
-        dapi_vol = load_image_and_get_dapi()
-        otsu_path = out_dir / "01_otsu_mask.tif"
-        if otsu_path.exists() and not (run_both and recompute_otsu):
-            otsu_mask = tifffile.imread(otsu_path).astype(bool)
-        else:
-            st.info("No se encontró Otsu previo o se forzó recalcular; generando uno temporal…")
-            otsu_mask = compute_and_save_otsu(dapi_vol, out_dir)
-
-        dapi_clean = np.where(otsu_mask, dapi_vol, 0)
-        if status["cellpose"] and not recompute_cellpose:
-            st.info("Ya existe 02_cellpose_mask.tif. Marca 'Forzar recalcular' para sobrescribir.")
-        else:
-            with st.spinner("Corriendo Cellpose (puede tardar)…"):
-                compute_and_save_cellpose(dapi_clean, out_dir)
-    except Exception as e:
-        st.error(f"Error en Cellpose: {e}")
-
-
-# --------- 5) Ver en Napari ---------
 def _launch_napari(include_masks: bool):
     env = os.environ.copy()
-    # Calibración para escala
-    cal = _read_global_calibration()
-    z = float(cal.get('z', 1.0))
-    y = float(cal.get('y', 1.0))
-    x = float(cal.get('x', 1.0))
+    z = float(glob_calib.get('z', 1.0)); y = float(glob_calib.get('y', 0.3)); x = float(glob_calib.get('x', 0.3))
     cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x)]
     if include_masks:
         otsu_path = out_dir / "01_otsu_mask.tif"
         cellpose_path = out_dir / "02_cellpose_mask.tif"
-        if otsu_path.exists():
-            cmd += ["--otsu", str(otsu_path)]
-        if cellpose_path.exists():
-            cmd += ["--cellpose", str(cellpose_path)]
+        if otsu_path.exists(): cmd += ["--otsu", str(otsu_path)]
+        if cellpose_path.exists(): cmd += ["--cellpose", str(cellpose_path)]
     try:
-        env["NAPARI_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         subprocess.Popen(cmd, env=env)
         st.info("Napari lanzado en una ventana separada.")
     except Exception as e:
@@ -297,6 +203,5 @@ def _launch_napari(include_masks: bool):
 
 if open_napari_image:
     _launch_napari(include_masks=False)
-
 if open_napari_with_masks:
     _launch_napari(include_masks=True)

@@ -3,20 +3,18 @@ from pathlib import Path
 import numpy as np
 import tifffile
 import napari
-
+import json as _json
 
 def reorder_to_zcyx(arr, axes: str | None):
     """Reordena un array con ejes reportados por tifffile.series a (Z, C, Y, X)."""
     if axes is None:
         if arr.ndim != 4:
             raise ValueError(f"Forma inesperada sin ejes: {arr.shape}")
-        # Heurística: canal es el eje menor
         chan_axis = int(np.argmin(arr.shape))
         if chan_axis != 1:
             arr = np.moveaxis(arr, chan_axis, 1)
         return arr
     ax_list = list(axes)
-    # Seleccionar T=0 si existe
     if 'T' in ax_list:
         t_idx = ax_list.index('T')
         arr = np.take(arr, indices=0, axis=t_idx)
@@ -44,11 +42,19 @@ def load_image_any(path: Path):
         raise ValueError(f"Extensión no soportada: {suffix}")
 
 
-def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose_path: Path | None = None, gfap_path: Path | None = None, final_path: Path | None = None, skeleton_path: Path | None = None, rings_json: Path | None = None):
+def open_napari(
+    image_path: Path, 
+    scale, 
+    otsu_path: Path | None = None, 
+    cellpose_path: Path | None = None, 
+    gfap_path: Path | None = None, 
+    final_path: Path | None = None, 
+    skeleton_path: Path | None = None, 
+    rings_json: Path | None = None
+):
     image, axes = load_image_any(image_path)
     image = reorder_to_zcyx(image, axes)
 
-    # Nombres de canales típicos
     ch_names = None
     if image.shape[1] == 3:
         ch_names = ["DAPI", "GFAP", "Microglia"]
@@ -64,80 +70,137 @@ def open_napari(image_path: Path, scale, otsu_path: Path | None = None, cellpose
         scale=scale,
     )
 
-    # Agregar máscaras si fueron provistas
-    if otsu_path is not None and Path(otsu_path).exists():
-        try:
-            otsu_mask = tifffile.imread(str(otsu_path))
-            v.add_labels(otsu_mask, name="01 - Máscara Otsu", scale=scale, visible=False)
-        except Exception as e:
-            print(f"Advertencia: no se pudo cargar Otsu {otsu_path}: {e}")
+    # --- Cargar Máscaras (con escala) ---
+    mask_paths = {
+        "01 - Máscara Otsu": otsu_path,
+        "02 - Máscara Cellpose": cellpose_path,
+        "03 - Filtro GFAP/Microglía": gfap_path,
+        "04 - Astrocitos Finales": final_path,
+        "05 - Skeleton (labels)": skeleton_path
+    }
+    
+    for name, path in mask_paths.items():
+        if path is not None and Path(path).exists():
+            try:
+                mask = tifffile.imread(str(path))
+                v.add_labels(mask, name=name, scale=scale, visible=(name == "04 - Astrocitos Finales"))
+            except Exception as e:
+                print(f"Advertencia: no se pudo cargar {name} {path}: {e}")
 
-    if cellpose_path is not None and Path(cellpose_path).exists():
-        try:
-            cellpose_mask = tifffile.imread(str(cellpose_path))
-            v.add_labels(cellpose_mask, name="02 - Máscara Cellpose", scale=scale, visible=True)
-        except Exception as e:
-            print(f"Advertencia: no se pudo cargar Cellpose {cellpose_path}: {e}")
-
-    if gfap_path is not None and Path(gfap_path).exists():
-        try:
-            gfap_mask = tifffile.imread(str(gfap_path))
-            v.add_labels(gfap_mask, name="03 - Filtro GFAP/Microglía", scale=scale, visible=True)
-        except Exception as e:
-            print(f"Advertencia: no se pudo cargar GFAP filtrado {gfap_path}: {e}")
-
-    if final_path is not None and Path(final_path).exists():
-        try:
-            final_mask = tifffile.imread(str(final_path))
-            v.add_labels(final_mask, name="04 - Astrocitos Finales", scale=scale, visible=True)
-        except Exception as e:
-            print(f"Advertencia: no se pudo cargar Máscara Final {final_path}: {e}")
-
-    if skeleton_path is not None and Path(skeleton_path).exists():
-        try:
-            skel = tifffile.imread(str(skeleton_path))
-            v.add_labels(skel, name="05 - Skeleton (labels)", scale=scale, visible=True)
-        except Exception as e:
-            print(f"Advertencia: no se pudo cargar Skeleton {skeleton_path}: {e}")
-    # Círculos de Sholl (Shapes 2D sobre planos Z dados)
+    # --- Cargar Anillos de Sholl (convertir µm -> voxels y dibujar) ---
     if rings_json is not None and Path(rings_json).exists():
         try:
-            import json as _json
             data = _json.loads(Path(rings_json).read_text())
-            items = data.get("items", [])
-            shapes = []
-            for it in items:
-                z = int(it.get("z_index", 0))
-                cy = float(it.get("y_px", 0.0))
-                cx = float(it.get("x_px", 0.0))
-                radii = it.get("radii_px", [])
-                for r in radii:
-                    r = float(r)
-                    # polígono aproximando el círculo en el plano z
-                    theta = np.linspace(0, 2*np.pi, 64, endpoint=True)
-                    yy = cy + r * np.sin(theta)
-                    xx = cx + r * np.cos(theta)
-                    # Napari espera data como (N, D) con D=3 para 3D; fijamos z constante
-                    poly = np.stack([np.full_like(yy, z), yy, xx], axis=1)
-                    # Para 'path', repetir el primer punto al final para cerrar el anillo
-                    poly = np.concatenate([poly, poly[:1]], axis=0)
-                    shapes.append(poly)
-            if shapes:
-                # Usar 'path' en lugar de 'polygon' para evitar triangulación en 3D
-                # y errores al activar la vista 3D de napari.
-                v.add_shapes(
-                    shapes,
-                    shape_type='path',
-                    name='Sholl rings',
-                    edge_color='#FFFF00',  # hex color to avoid property lookup
-                    edge_width=1,
-                    face_color='transparent',
-                    scale=scale,  # alinear con imagen
-                    blending='translucent',
-                    opacity=0.7,
-                )
+
+            all_ellipsoid_boxes = []
+            all_ring_polygons = []
+
+            # Asegurarse de que `scale` esté disponible: esperado (z_um, y_um, x_um)
+            try:
+                scale_z, scale_y, scale_x = scale
+            except Exception:
+                # Si scale no tiene 3 elementos, asumir 1.0
+                scale_z = scale_y = scale_x = 1.0
+
+            # El formato es {"label": {"centroid_um": [z,y,x], "radii_um": [r1, r2...]}}
+            for label, info in data.items():
+                center_um = info.get("centroid_um")
+                radii_um_list = info.get("radii_um", [])
+                if center_um is None or not radii_um_list:
+                    continue
+                center_um = np.asarray(center_um, dtype=float)
+
+                for r in radii_um_list:
+                    try:
+                        r = float(r)
+                    except Exception:
+                        continue
+                    if r <= 0:
+                        continue
+
+                    # Convertir centro y radios de µm a coordenadas en vóxeles (Z,Y,X)
+                    # Pero detectamos si `center_um` ya está en voxeles: si dividir por scale
+                    # produce coordenadas fuera de la imagen, preferimos tratarlas como voxels.
+                    try:
+                        cand_vox = center_um / np.array([scale_z, scale_y, scale_x], dtype=float)
+                    except Exception:
+                        cand_vox = center_um
+
+                    # Imagen dims en voxeles
+                    z_dim = image.shape[0]
+                    y_dim = image.shape[2]
+                    x_dim = image.shape[3]
+
+                    def in_bounds(v):
+                        return (v[0] >= 0 and v[0] < z_dim) and (v[1] >= 0 and v[1] < y_dim) and (v[2] >= 0 and v[2] < x_dim)
+
+                    if in_bounds(cand_vox):
+                        center_vox = cand_vox
+                    else:
+                        # If the raw center_um already looks like voxel coords, use it directly
+                        if in_bounds(center_um):
+                            center_vox = center_um.astype(float)
+                        else:
+                            # As a last resort, clamp the cand_vox into image bounds
+                            center_vox = np.clip(cand_vox, [0,0,0], [z_dim-1, y_dim-1, x_dim-1])
+
+                    # For ring polygons we need separate radii in Y and X voxels
+                    ry = r / scale_y if scale_y > 0 else r
+                    rx = r / scale_x if scale_x > 0 else r
+
+                    # Build a circular polygon in the Y-X plane at constant Z=center_vox[0]
+                    npts = 128
+                    thetas = np.linspace(0, 2*np.pi, npts, endpoint=False)
+                    ys = center_vox[1] + ry * np.sin(thetas)
+                    xs = center_vox[2] + rx * np.cos(thetas)
+                    zs = np.full_like(xs, fill_value=center_vox[0])
+                    poly = np.vstack([zs, ys, xs]).T  # shape (npts, 3) as (z,y,x)
+                    # Only keep polygons that are at least partially inside the image bounds
+                    if np.any((ys >= 0) & (ys < y_dim) & (xs >= 0) & (xs < x_dim)):
+                        all_ring_polygons.append(poly)
+
+                    # Also keep a simple ellipse-like shape for compatibility with older napari
+                    shape_data = np.asarray([center_vox.tolist(), [r/scale_z if scale_z>0 else r, r/scale_y if scale_y>0 else r, r/scale_x if scale_x>0 else r]], dtype=float)
+                    if shape_data.shape == (2, 3):
+                        all_ellipsoid_boxes.append(shape_data)
+
+            # Prefer drawing ring polygons (concentric rings per astrocyte)
+            if all_ring_polygons:
+                try:
+                    v.add_shapes(all_ring_polygons, shape_type='polygon', name='Sholl rings (polygons)', face_color='transparent', edge_color='#FFFF00', edge_width=1.0, opacity=0.8, scale=scale)
+                except Exception as e:
+                    print(f"Advertencia: add_shapes falló con polygons ({e}), intentando ellipses...")
+                    # Fall back to ellipses if polygons are problematic
+                    if all_ellipsoid_boxes:
+                        try:
+                            v.add_shapes(all_ellipsoid_boxes, shape_type='ellipse', name='Sholl rings (ellipses)', face_color='transparent', edge_color='#FFFF00', edge_width=1.0, opacity=0.6, scale=scale)
+                        except Exception as ex:
+                            print(f"Advertencia: add_shapes falló con ellipses también ({ex}), usando puntos centrales.")
+                            # Final fallback: points at centers
+                            try:
+                                centers = np.array([s[0] for s in all_ellipsoid_boxes])
+                                if centers.size:
+                                    v.add_points(centers, name='Sholl centers (fallback)', size=5.0, face_color='#FFFF00', scale=scale)
+                            except Exception as exc:
+                                print(f"Advertencia: no se pudieron añadir puntos de fallback: {exc}")
+                    else:
+                        print("Advertencia: no hay datos de elipses para intentar fallback.")
+            elif all_ellipsoid_boxes:
+                # If no polygons available, try ellipses directly
+                try:
+                        v.add_shapes(all_ellipsoid_boxes, shape_type='ellipse', name='Sholl rings (ellipses)', face_color='transparent', edge_color='#FFFF00', edge_width=1.0, opacity=0.6, scale=scale)
+                except Exception as e:
+                    print(f"Advertencia: add_shapes falló con ellipses ({e}), usando puntos centrales.")
+                    try:
+                        centers = np.array([s[0] for s in all_ellipsoid_boxes])
+                        if centers.size:
+                            v.add_points(centers, name='Sholl centers (fallback)', size=5.0, face_color='#FFFF00', scale=scale)
+                    except Exception as exc:
+                        print(f"Advertencia: no se pudieron añadir puntos de fallback: {exc}")
+
         except Exception as e:
-            print(f"Advertencia: no se pudieron dibujar anillos de Sholl: {e}")
+            print(f"Advertencia: no se pudieron dibujar anillos de Sholl 3D: {e}")
+            
     napari.run()
 
 
@@ -146,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--path", required=True, help="Ruta al archivo de imagen")
     parser.add_argument("--z", type=float, required=True, help="Tamaño de vóxel Z en µm")
     parser.add_argument("--y", type=float, required=True, help="Tamaño de vóxel Y en µm")
-    parser.add_argument("--x", type=float, required=True, help="Tamaño de vóxel X en µm")
+    parser.add_argument("--x", type=float, required=False, help="Tamao de vóxel X en µm")
     parser.add_argument("--otsu", type=str, required=False, help="Ruta a 01_otsu_mask.tif")
     parser.add_argument("--cellpose", type=str, required=False, help="Ruta a 02_cellpose_mask.tif")
     parser.add_argument("--gfap", type=str, required=False, help="Ruta a 03_gfap_microglia_filtered_mask.tif")
@@ -156,7 +219,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     p = Path(args.path)
-    scale = (args.z, args.y, args.x)
+    x_um = args.x if args.x is not None else args.y
+    scale = (args.z, args.y, x_um)
+    
     open_napari(
         p,
         scale,

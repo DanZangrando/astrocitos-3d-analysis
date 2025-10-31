@@ -3,11 +3,9 @@ from pathlib import Path
 from ui.sidebar import render_sidebar
 import json
 from datetime import datetime
-import numpy as np
 import pandas as pd
-import tifffile
-import altair as alt
-from scipy import stats
+import subprocess # <--- CORRECCIÓN
+import os # <--- CORRECCIÓN
 
 # Welcome page content based on project README
 st.set_page_config(page_title="Astrocitos 3D - Análisis", page_icon="🧠", layout="wide")
@@ -23,14 +21,25 @@ st.markdown(
 
     ---
 
-    ### Estado actual del pipeline
-    Hemos implementado la esqueletización 3D previa al análisis de Sholl. El flujo es:
-    1. Calibración física global (µm) — Z, Y, X en `streamlit/calibration.json`.
-    2. Segmentación de núcleos (DAPI) — Otsu opcional + Cellpose 3D.
-    3. Filtrado por GFAP/Microglía y limpieza por tamaño físico (µm³).
-    4. Esqueletización 3D por célula con re-muestreo isotrópico, umbral Otsu/Manual, cierre morfológico, dilatación de semilla, conectividad, radio máximo y:
-       - Resolución de solapamientos por cercanía al núcleo.
-       - Territorios Voronoi con zona de exclusión en fronteras para evitar entrelazados ambiguos.
+    ### Flujo del pipeline
+    El flujo de procesamiento unificado (`pipeline.py`) ahora es:
+    1. **Calibración:** Lectura de `calibration.json` para µm/px y parámetros.
+    2. **Otsu (01):** Genera máscara de fondo para DAPI.
+    3. **Cellpose (02):** Segmenta núcleos (`02_cellpose_mask.tif`).
+    4. **Filtrado (03):**
+       - Identifica candidatos usando umbrales **relativos** (StdDev sobre fondo).
+       - Genera `03_nucleus_metrics.csv` (con métricas de núcleo y estado de filtrado).
+       - Genera `03_gfap_microglia_filtered_mask.tif`.
+    5. **Filtro de Tamaño (04):**
+       - Limpia candidatos por `MIN_VOLUME_UM3`.
+       - Genera `04_final_astrocytes_mask.tif`.
+    6. **Esqueletización (05):**
+       - Lógica de re-muestreo isotrópico, Voronoi, y resolución de conflictos.
+       - Genera `05_skeleton_labels.tif`.
+       - Ejecuta `skan` y análisis de tubo/dominio.
+       - Guarda **todas** las métricas en `skeletons/summary.csv`.
+    7. **Sholl (06):**
+       - Genera `sholl.csv` (curvas) y `sholl_summary.csv` (AUC, pico, etc.).
     """
 )
 
@@ -73,7 +82,8 @@ with colv2:
                 st.error(f"JSON inválido: {e}")
             else:
                 _save_calib(new_cfg)
-                st.success("Cambios guardados en streamlit/calibration.json. Recargá la página para verlos reflejados en el sidebar.")
+                st.success("Cambios guardados. Recargá la página (F5) para aplicar.")
+                st.rerun()
     with bcol2:
         if st.button("🧰 Exportar backup con timestamp"):
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -81,7 +91,7 @@ with colv2:
             backup_path.write_text(json.dumps(cfg, indent=2))
             st.info(f"Backup exportado: {backup_path.relative_to(root)}")
 
-# --- Dashboard del pipeline por preparado (solo tabla de checkeo) ---
+# --- Dashboard del pipeline por preparado (ACTUALIZADO) ---
 st.markdown("---")
 st.subheader("Estado del pipeline por preparado")
 
@@ -96,33 +106,44 @@ def _detect_group(p: Path, root: Path) -> str:
 
 raw_dir = root / "data" / "raw"
 files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
+
 if files:
     stem_to_group_all = {p.stem: _detect_group(p, root) for p in files}
 
     group_filter = st.session_state.get("group_filter", "Todos")
     files_filtered = files if group_filter == "Todos" else [p for p in files if stem_to_group_all.get(p.stem, "CTL") == group_filter]
 
-    import pandas as _pd
     rows = []
     for p in files_filtered:
         od = root / "data" / "processed" / p.stem
         rows.append({
             "prepared": p.stem,
             "group": stem_to_group_all.get(p.stem, "CTL"),
-            "01_otsu": (od/"01_otsu_mask.tif").exists(),
-            "02_cellpose": (od/"02_cellpose_mask.tif").exists(),
-            "03_gfap": (od/"03_gfap_microglia_filtered_mask.tif").exists(),
-            "04_final": (od/"04_final_astrocytes_mask.tif").exists(),
-            "05_skeleton": (od/"05_skeleton_labels.tif").exists(),
-            "06_sholl": (od/"sholl.csv").exists(),
+            "02_Nucleos": (od/"02_cellpose_mask.tif").exists(),
+            "03_Metricas_Nucleo": (od/"03_nucleus_metrics.csv").exists(),
+            "04_Astrocitos": (od/"04_final_astrocytes_mask.tif").exists(),
+            "05_Metricas_Skel": (od/"skeletons"/"summary.csv").exists(),
+            "06_Metricas_Sholl": (od/"sholl_summary.csv").exists(),
         })
-    df_state = _pd.DataFrame(rows)
+    
+    df_state = pd.DataFrame(rows)
+    
     if not df_state.empty:
         def mark(col):
             return df_state[col].map(lambda v: "✅" if bool(v) else "—")
+        
         view = df_state.copy()
-        for c in ["01_otsu","02_cellpose","03_gfap","04_final","05_skeleton","06_sholl"]:
-            view[c] = mark(c)
+        # Actualizar los nombres de las columnas para el dashboard
+        cols_to_check = [
+            "02_Nucleos", "03_Metricas_Nucleo", "04_Astrocitos", 
+            "05_Metricas_Skel", "06_Metricas_Sholl"
+        ]
+        for c in cols_to_check:
+            if c in view.columns: # Comprobar si la columna existe antes de marcar
+                view[c] = mark(c)
+                
         st.dataframe(view.set_index(["prepared","group"]), use_container_width=True)
+    else:
+        st.info("No hay preparados para mostrar con el filtro actual.")
 else:
     st.info("No se encontraron archivos en data/raw. Cargá tu dataset para ver el dashboard.")
