@@ -1,6 +1,7 @@
 import streamlit as st
 from pathlib import Path
 from ui.sidebar import render_sidebar
+from ui.utils import detect_group
 import json
 from datetime import datetime
 import pandas as pd
@@ -22,24 +23,24 @@ st.markdown(
     ---
 
     ### Flujo del pipeline
-    El flujo de procesamiento unificado (`pipeline.py`) ahora es:
-    1. **Calibración:** Lectura de `calibration.json` para µm/px y parámetros.
-    2. **Otsu (01):** Genera máscara de fondo para DAPI.
-    3. **Cellpose (02):** Segmenta núcleos (`02_cellpose_mask.tif`).
-    4. **Filtrado (03):**
-       - Identifica candidatos usando umbrales **relativos** (StdDev sobre fondo).
-       - Genera `03_nucleus_metrics.csv` (con métricas de núcleo y estado de filtrado).
-       - Genera `03_gfap_microglia_filtered_mask.tif`.
-    5. **Filtro de Tamaño (04):**
-       - Limpia candidatos por `MIN_VOLUME_UM3`.
-       - Genera `04_final_astrocytes_mask.tif`.
-    6. **Esqueletización (05):**
-       - Lógica de re-muestreo isotrópico, Voronoi, y resolución de conflictos.
-       - Genera `05_skeleton_labels.tif`.
-       - Ejecuta `skan` y análisis de tubo/dominio.
-       - Guarda **todas** las métricas en `skeletons/summary.csv`.
-    7. **Sholl (06):**
-       - Genera `sholl.csv` (curvas) y `sholl_summary.csv` (AUC, pico, etc.).
+    El flujo de procesamiento unificado (4 pasos):
+    1. **Calibración (01):** Lectura de `calibration.json` para µm/px → Máscara Otsu de fondo DAPI
+    2. **Segmentación (02):** Cellpose 3D → `02_cellpose_mask.tif`
+    3. **Filtrado (03):** 
+       - Filtrado GFAP relativo (StdDev sobre fondo) → `03_gfap_filtered_mask.tif`
+       - Filtrado por tamaño físico → `04_final_astrocytes_mask.tif`
+    4. **Esqueletización + Sholl (04):** **Pipeline 2D unificado**
+       - Proyección 3D→2D (max projection)
+       - Territorios Voronoi con zona de exclusión
+       - Esqueletización 2D por territorio con conexión de fragmentos
+       - Análisis de Sholl 2D nativo integrado (SKAN)
+       - Genera `05_skeleton_labels_2d.tif`, `sholl_2d_native.csv`, `sholl_summary.csv`, `sholl_rings_2d_native.json`
+    
+    **Ventajas del flujo 2D nativo:**
+    - ✅ Resolución XY completa (0.38 µm) sin degradación
+    - ✅ Sholl 2D más preciso y eficiente
+    - ✅ Territorios astrocitarios bien definidos para preparados planos
+    - ✅ Más rápido (~10x) que esqueletización 3D con remuestreo isotrópico
     """
 )
 
@@ -95,20 +96,11 @@ with colv2:
 st.markdown("---")
 st.subheader("Estado del pipeline por preparado")
 
-def _detect_group(p: Path, root: Path) -> str:
-    try:
-        rel = str(p.relative_to(root)).lower()
-    except Exception:
-        rel = str(p).lower()
-    if "/hip/" in rel:
-        return "Hipoxia"
-    return "CTL"
-
 raw_dir = root / "data" / "raw"
 files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
 
 if files:
-    stem_to_group_all = {p.stem: _detect_group(p, root) for p in files}
+    stem_to_group_all = {p.stem: detect_group(p, root) for p in files}
 
     group_filter = st.session_state.get("group_filter", "Todos")
     files_filtered = files if group_filter == "Todos" else [p for p in files if stem_to_group_all.get(p.stem, "CTL") == group_filter]
@@ -122,8 +114,8 @@ if files:
             "02_Nucleos": (od/"02_cellpose_mask.tif").exists(),
             "03_Metricas_Nucleo": (od/"03_nucleus_metrics.csv").exists(),
             "04_Astrocitos": (od/"04_final_astrocytes_mask.tif").exists(),
-            "05_Metricas_Skel": (od/"skeletons"/"summary.csv").exists(),
-            "06_Metricas_Sholl": (od/"sholl_summary.csv").exists(),
+            "04_Skeleton_2D": (od/"05_skeleton_labels_2d.tif").exists(),
+            "04_Sholl_2D": (od/"sholl_2d_native.csv").exists(),
         })
     
     df_state = pd.DataFrame(rows)
@@ -136,10 +128,10 @@ if files:
         # Actualizar los nombres de las columnas para el dashboard
         cols_to_check = [
             "02_Nucleos", "03_Metricas_Nucleo", "04_Astrocitos", 
-            "05_Metricas_Skel", "06_Metricas_Sholl"
+            "04_Skeleton_2D", "04_Sholl_2D"
         ]
         for c in cols_to_check:
-            if c in view.columns: # Comprobar si la columna existe antes de marcar
+            if c in view.columns:
                 view[c] = mark(c)
                 
         st.dataframe(view.set_index(["prepared","group"]), use_container_width=True)

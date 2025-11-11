@@ -189,7 +189,10 @@ open_napari_with_masks = st.button("🧪 Abrir en Napari con máscaras disponibl
 def _launch_napari(include_masks: bool):
     env = os.environ.copy()
     z = float(glob_calib.get('z', 1.0)); y = float(glob_calib.get('y', 0.3)); x = float(glob_calib.get('x', 0.3))
-    cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x)]
+    dapi_idx = int(glob_calib.get("DAPI_CHANNEL_INDEX", 0))
+    gfap_idx = int(glob_calib.get("GFAP_CHANNEL_INDEX", 1))
+    cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x),
+           "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
     if include_masks:
         otsu_path = out_dir / "01_otsu_mask.tif"
         cellpose_path = out_dir / "02_cellpose_mask.tif"

@@ -35,21 +35,41 @@ def _read_global_calibration(calib_path: Path) -> dict:
 
 def render_sidebar(show_calibration: bool = True):
     """
-    Styled sidebar with:
-    - App header and unified group filter.
-    - Control panel for global parameters (from calibration.json) with tooltips.
-    Use this from any page; style is injected once per run.
+    Sidebar con:
+    - Header de la app y filtro de grupo unificado
+    - Panel de parámetros globales del pipeline 2D nativo
+    - Herramienta de ejecución batch (individual/grupo/todos)
     """
     _inject_css()
 
     with st.sidebar:
         st.markdown("### 🧠 Astrocitos 3D")
-        st.markdown("<span class='sidebar-badge'>Análisis morfológico</span>", unsafe_allow_html=True)
+        st.markdown("<span class='sidebar-badge'>Pipeline 2D Nativo</span>", unsafe_allow_html=True)
         st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-        st.caption("Usá el selector de páginas arriba para navegar.")
+        
+        # Info rápida del flujo
+        with st.expander("ℹ️ Flujo del Pipeline (4 pasos)", expanded=False):
+            st.markdown("""
+            **01. Calibración + Visualización**
+            - Detección de escala física (µm)
+            
+            **02. Segmentación Nuclear**
+            - Umbral Otsu + Cellpose 3D
+            
+            **03. Filtrado de Astrocitos**
+            - Clasificación GFAP+ (relativa)
+            - Filtro por volumen mínimo
+            
+            **04. Skeleton + Sholl 2D**
+            - Proyección 3D→2D
+            - Territorios Voronoi
+            - Esqueletización + Sholl integrado
+            """)
+
+        st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
 
         # Selector unificado de grupo
-        st.markdown("**Filtro global de grupo**")
+        st.markdown("**🔍 Filtro de Grupo**")
         grp = st.radio(
             "Grupo",
             options=["Todos", "CTL", "Hipoxia"],
@@ -64,112 +84,230 @@ def render_sidebar(show_calibration: bool = True):
             root = Path(__file__).resolve().parents[1]
             calib_path = root / "calibration.json"
             glob = _read_global_calibration(calib_path)
-            st.markdown("**Panel de parámetros globales**")
-            with st.form("__control_panel__"):
-                tz, ty, tx = st.columns(3)
-                with tz:
-                    glob["z"] = st.number_input("Voxel Z (µm)", value=float(glob.get("z", 1.0)), min_value=0.001, step=0.001, format="%.3f", help="Espaciado físico del vóxel en Z.")
-                with ty:
-                    glob["y"] = st.number_input("Voxel Y (µm)", value=float(glob.get("y", 0.3)), min_value=0.001, step=0.001, format="%.3f", help="Espaciado físico del vóxel en Y.")
-                with tx:
-                    glob["x"] = st.number_input("Voxel X (µm)", value=float(glob.get("x", 0.3)), min_value=0.001, step=0.001, format="%.3f", help="Espaciado físico del vóxel en X.")
+            
+            st.markdown("**⚙️ Configuración Global**")
+            
+            with st.expander("📏 Calibración Espacial", expanded=False):
+                with st.form("__calib_form__"):
+                    st.caption("Espaciado físico de vóxeles")
+                    tz, ty, tx = st.columns(3)
+                    glob["z"] = tz.number_input("Z (µm)", value=float(glob.get("z", 0.38)), min_value=0.001, step=0.01, format="%.3f")
+                    glob["y"] = ty.number_input("Y (µm)", value=float(glob.get("y", 0.38)), min_value=0.001, step=0.01, format="%.3f")
+                    glob["x"] = tx.number_input("X (µm)", value=float(glob.get("x", 0.38)), min_value=0.001, step=0.01, format="%.3f")
+                    
+                    st.caption("Índices de canales (base 0)")
+                    c1, c2 = st.columns(2)
+                    glob["DAPI_CHANNEL_INDEX"] = c1.number_input("DAPI", value=int(glob.get("DAPI_CHANNEL_INDEX", 0)), min_value=0, step=1)
+                    glob["GFAP_CHANNEL_INDEX"] = c2.number_input("GFAP", value=int(glob.get("GFAP_CHANNEL_INDEX", 1)), min_value=0, step=1)
+                    
+                    if st.form_submit_button("💾 Guardar calibración"):
+                        try:
+                            calib_path.write_text(json.dumps(glob, indent=2))
+                            st.success("✅ Calibración guardada")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
-                st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-                st.markdown("**Canales y Cellpose**")
-                c1, c2 = st.columns(2)
-                glob["DAPI_CHANNEL_INDEX"] = c1.number_input("Canal DAPI", value=int(glob.get("DAPI_CHANNEL_INDEX", 0)), min_value=0, step=1, help="Índice de canal para DAPI (base 0).")
-                glob["GFAP_CHANNEL_INDEX"] = c2.number_input("Canal GFAP", value=int(glob.get("GFAP_CHANNEL_INDEX", 1)), min_value=0, step=1, help="Índice de canal para GFAP.")
-                c3, c4 = st.columns(2)
-                glob["MICROGLIA_CHANNEL_INDEX"] = c3.number_input("Canal Microglía", value=int(glob.get("MICROGLIA_CHANNEL_INDEX", 2)), min_value=0, step=1, help="Índice de canal para Microglía.")
-                glob["NUCLEUS_DIAMETER"] = c4.number_input("Diám. núcleo (px)", value=int(glob.get("NUCLEUS_DIAMETER", 30)), min_value=1, step=1, help="Diámetro estimado de núcleos para Cellpose.")
-                glob["CELLPOSE_USE_GPU"] = st.checkbox("Usar GPU en Cellpose", value=bool(glob.get("CELLPOSE_USE_GPU", True)), help="Intentar usar GPU si está disponible.")
+            with st.expander("🔬 Segmentación Nuclear (Paso 02)", expanded=False):
+                with st.form("__cellpose_form__"):
+                    glob["NUCLEUS_DIAMETER"] = st.number_input(
+                        "Diámetro núcleo (px)", 
+                        value=int(glob.get("NUCLEUS_DIAMETER", 30)), 
+                        min_value=5, step=1,
+                        help="Diámetro esperado de núcleos para Cellpose"
+                    )
+                    glob["CELLPOSE_USE_GPU"] = st.checkbox(
+                        "Usar GPU", 
+                        value=bool(glob.get("CELLPOSE_USE_GPU", True)),
+                        help="Acelera Cellpose si hay GPU disponible"
+                    )
+                    
+                    if st.form_submit_button("💾 Guardar segmentación"):
+                        try:
+                            calib_path.write_text(json.dumps(glob, indent=2))
+                            st.success("✅ Parámetros guardados")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
-                # --- INICIO DE LA CORRECCIÓN ---
-                # Reemplazar parámetros de filtrado absolutos por relativos
-                st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-                st.markdown("**Filtrado (Relativo a Fondo)**")
-                f1, f2 = st.columns(2)
-                glob["SHELL_RADIUS_UM"] = f1.number_input("Radio del Shell (µm)", value=float(glob.get("SHELL_RADIUS_UM", 2.0)), min_value=0.1, step=0.1, help="Radio en µm del 'shell' alrededor del núcleo para medir señal.")
-                glob["MIN_VOLUME_UM3"] = f2.number_input("Vol. mín. (µm³)", value=float(glob.get("MIN_VOLUME_UM3", 75)), min_value=0.0, step=1.0, help="Volumen mínimo del núcleo (post-cellpose) para ser considerado 'final'.")
-                
-                f3, f4 = st.columns(2)
-                glob["GFAP_STD_DEV_THRESHOLD"] = f3.number_input("Umbral GFAP (StdDev)", value=float(glob.get("GFAP_STD_DEV_THRESHOLD", 3.0)), min_value=0.0, step=0.1, help="N° de Desv. Estándar sobre el fondo para GFAP.")
-                glob["MICROGLIA_STD_DEV_THRESHOLD"] = f4.number_input("Umbral Microglía (StdDev)", value=float(glob.get("MICROGLIA_STD_DEV_THRESHOLD", 5.0)), min_value=0.0, step=0.1, help="N° de Desv. Estándar sobre el fondo para Microglía (se descarta si es MAYOR).")
-                # --- FIN DE LA CORRECCIÓN ---
+            with st.expander("🧪 Filtrado de Astrocitos (Paso 03)", expanded=False):
+                with st.form("__filter_form__"):
+                    st.caption("Clasificación GFAP+ (relativa a fondo)")
+                    glob["GFAP_STD_DEV_THRESHOLD"] = st.number_input(
+                        "Umbral GFAP (N° StdDev)", 
+                        value=float(glob.get("GFAP_STD_DEV_THRESHOLD", 3.0)), 
+                        min_value=0.0, step=0.1,
+                        help="N° de desviaciones estándar sobre el fondo para GFAP+"
+                    )
+                    
+                    f1, f2 = st.columns(2)
+                    glob["SHELL_RADIUS_UM"] = f1.number_input(
+                        "Radio shell (µm)", 
+                        value=float(glob.get("SHELL_RADIUS_UM", 2.0)), 
+                        min_value=0.1, step=0.1,
+                        help="Radio del anillo perinuclear para medir GFAP"
+                    )
+                    glob["MAX_DILATION_ITERATIONS"] = f2.number_input(
+                        "Máx. iteraciones", 
+                        value=int(glob.get("MAX_DILATION_ITERATIONS", 10)), 
+                        min_value=1, step=1,
+                        help="Iteraciones de dilatación para formar el shell"
+                    )
+                    
+                    st.caption("Filtro por volumen")
+                    glob["MIN_VOLUME_UM3"] = st.number_input(
+                        "Volumen mínimo (µm³)", 
+                        value=float(glob.get("MIN_VOLUME_UM3", 75)), 
+                        min_value=0.0, step=5.0,
+                        help="Volumen mínimo del núcleo para ser considerado válido"
+                    )
+                    
+                    st.caption("Avanzado (opcional)")
+                    glob["GFAP_INTENSITY_THRESHOLD"] = st.number_input(
+                        "Umbral intensidad GFAP (fallback)", 
+                        value=float(glob.get("GFAP_INTENSITY_THRESHOLD", 50.0)), 
+                        min_value=0.0, step=1.0,
+                        help="Umbral absoluto usado si clasificación relativa falla"
+                    )
+                    
+                    if st.form_submit_button("💾 Guardar filtrado"):
+                        try:
+                            calib_path.write_text(json.dumps(glob, indent=2))
+                            st.success("✅ Filtros guardados")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
-                st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-                st.markdown("**Esqueleto (3D)**")
-                s1, s2 = st.columns(2)
-                glob["SKELETON_TARGET_ISO_UM"] = s1.number_input("Vóxel iso (µm)", value=float(glob.get("SKELETON_TARGET_ISO_UM", min(float(glob.get("z",1.0)), float(glob.get("y",0.3)), float(glob.get("x",0.3))))), min_value=0.05, step=0.01, format="%.2f", help="Tamaño de vóxel al que se remuestrea la ROI.")
-                glob["SKELETON_PADDING_UM"] = s2.number_input("Padding ROI (µm)", value=float(glob.get("SKELETON_PADDING_UM", 2.0)), min_value=0.0, step=0.5, help="Margen alrededor de la ROI del núcleo.")
-                s3, s4 = st.columns(2)
-                glob["SKELETON_SEED_DILATE_UM"] = s3.number_input("Dilatación semilla (µm)", value=float(glob.get("SKELETON_SEED_DILATE_UM", 2.0)), min_value=0.0, step=0.5, help="Dilatación del núcleo en isotrópico.")
-                glob["SKELETON_CONNECTIVITY"] = s4.selectbox("Conectividad 3D", options=[6,26], index=1 if int(glob.get("SKELETON_CONNECTIVITY",26))==26 else 0, help="Conectividad para componente conectado.")
-                s5, s6 = st.columns(2)
-                glob["SKELETON_CLOSING_UM"] = s5.number_input("Cierre morfológico (µm)", value=float(glob.get("SKELETON_CLOSING_UM", 0.8)), min_value=0.0, step=0.1, help="Cierre para unir hebras.")
-                glob["SKELETON_MAX_RADIUS_UM"] = s6.number_input("Radio máx. (µm)", value=float(glob.get("SKELETON_MAX_RADIUS_UM", 50.0)), min_value=0.0, step=1.0, help="Limita el dominio por distancia.")
-                s7, s8 = st.columns(2)
-                glob["SKELETON_THRESHOLD_MODE"] = s7.selectbox("Umbral GFAP", options=["otsu","manual"], index=(0 if str(glob.get("SKELETON_THRESHOLD_MODE","otsu")).lower().startswith("otsu") else 1), help="Modo de umbral en la ROI.")
-                glob["SKELETON_MANUAL_THRESHOLD"] = s8.number_input("Umbral manual", value=float(glob.get("SKELETON_MANUAL_THRESHOLD", 50.0)), min_value=0.0, step=1.0, help="Valor si el modo es 'manual'.")
-                s9, s10 = st.columns(2)
-                glob["SKELETON_TERRITORY_VORONOI"] = s9.checkbox("Territorios Voronoi", value=bool(glob.get("SKELETON_TERRITORY_VORONOI", False)), help="Restringir por territorio más cercano.")
-                glob["SKELETON_TERRITORY_EXCLUSION_UM"] = s10.number_input("Exclusión frontera (µm)", value=float(glob.get("SKELETON_TERRITORY_EXCLUSION_UM", 1.0)), min_value=0.0, step=0.1, help="‘Gap’ en la frontera de territorios.")
-                s11, s12 = st.columns(2)
-                glob["SKELETON_DOMAIN_VOLUME_SOURCE"] = s11.selectbox("Volumen de dominio", options=["gfap","voronoi"], index=(0 if str(glob.get("SKELETON_DOMAIN_VOLUME_SOURCE","gfap")).lower().startswith("gfap") else 1), help="Fuente para volumen del dominio.")
-                glob["SKELETON_TUBE_RADIUS_UM"] = s12.number_input("Radio del tubo (µm)", value=float(glob.get("SKELETON_TUBE_RADIUS_UM", 1.5)), min_value=0.0, step=0.1, help="Radio para medir señal en esqueleto.")
-                s13, s14 = st.columns(2)
-                glob["SKELETON_PRUNE_ENABLE"] = s13.checkbox("Pruning espículas", value=bool(glob.get("SKELETON_PRUNE_ENABLE", False)), help="Eliminar ramas terminales cortas.")
-                glob["SKELETON_PRUNE_MIN_LEN_UM"] = s14.number_input("Long. mín. espícula (µm)", value=float(glob.get("SKELETON_PRUNE_MIN_LEN_UM", 2.0)), min_value=0.0, step=0.5, help="Umbral para pruning.")
+            with st.expander("🗺️ Pipeline 2D: Skeleton + Sholl (Paso 04)", expanded=False):
+                with st.form("__pipeline_2d_form__"):
+                    st.caption("Proyección 3D → 2D")
+                    glob["PROJECTION_2D_METHOD"] = st.selectbox(
+                        "Método de proyección", 
+                        options=["max", "mean", "sum"],
+                        index=["max", "mean", "sum"].index(str(glob.get("PROJECTION_2D_METHOD", "max")).lower()),
+                        help="max=preserva procesos débiles, mean=reduce ruido, sum=maximiza señal"
+                    )
+                    
+                    st.caption("Territorios Voronoi")
+                    glob["TERRITORY_EXCLUSION_UM"] = st.number_input(
+                        "Gap de exclusión (µm)", 
+                        value=float(glob.get("TERRITORY_EXCLUSION_UM", 1.0)), 
+                        min_value=0.0, step=0.5,
+                        help="Zona de exclusión entre territorios Voronoi"
+                    )
+                    
+                    st.caption("Dominio de análisis")
+                    glob["MAX_RADIUS_FROM_NUCLEUS_UM"] = st.number_input(
+                        "Radio máximo desde núcleo (µm)", 
+                        value=float(glob.get("MAX_RADIUS_FROM_NUCLEUS_UM", 100.0)), 
+                        min_value=10.0, max_value=200.0, step=10.0,
+                        help="Radio máximo para esqueletizar. Procesos más allá son ignorados (evita señal de fondo)"
+                    )
+                    
+                    st.caption("Conexión de fragmentos GFAP")
+                    glob["CONNECT_SKELETON_FRAGMENTS"] = st.checkbox(
+                        "Conectar fragmentos", 
+                        value=bool(glob.get("CONNECT_SKELETON_FRAGMENTS", True)),
+                        help="Conecta señal GFAP discontinua cercana"
+                    )
+                    if glob["CONNECT_SKELETON_FRAGMENTS"]:
+                        glob["CONNECTION_RADIUS_UM"] = st.number_input(
+                            "Radio de conexión (µm)", 
+                            value=float(glob.get("CONNECTION_RADIUS_UM", 0.5)), 
+                            min_value=0.0, step=0.1,
+                            help="Distancia máxima para conectar fragmentos"
+                        )
+                    
+                    st.caption("Análisis de Sholl 2D")
+                    sh1, sh2, sh3 = st.columns(3)
+                    glob["SHOLL_MIN_RADIUS_UM"] = sh1.number_input(
+                        "Mín (µm)", 
+                        value=float(glob.get("SHOLL_MIN_RADIUS_UM", 0.0)), 
+                        min_value=0.0, step=0.5
+                    )
+                    glob["SHOLL_MAX_RADIUS_UM"] = sh2.number_input(
+                        "Máx (µm)", 
+                        value=float(glob.get("SHOLL_MAX_RADIUS_UM", 50.0)), 
+                        min_value=0.0, step=1.0
+                    )
+                    glob["SHOLL_STEP_UM"] = sh3.number_input(
+                        "Paso (µm)", 
+                        value=float(glob.get("SHOLL_STEP_UM", 2.0)), 
+                        min_value=0.1, step=0.1
+                    )
+                    
+                    if st.form_submit_button("💾 Guardar pipeline 2D"):
+                        try:
+                            calib_path.write_text(json.dumps(glob, indent=2))
+                            st.success("✅ Pipeline 2D guardado")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
 
-                st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-                st.markdown("**Parámetros de Sholl**")
-                sh1, sh2 = st.columns(2)
-                glob["SHOLL_MIN_RADIUS_UM"] = sh1.number_input("Radio mín. (µm)", value=float(glob.get("SHOLL_MIN_RADIUS_UM", 0.0)), min_value=0.0, step=0.5, help="Radio para el primer anillo.")
-                glob["SHOLL_MAX_RADIUS_UM"] = sh2.number_input("Radio máx. (µm)", value=float(glob.get("SHOLL_MAX_RADIUS_UM", 50.0)), min_value=0.0, step=1.0, help="Radio máximo a evaluar.")
-                sh3, _ = st.columns([1,1])
-                glob["SHOLL_STEP_UM"] = sh3.number_input("Paso entre anillos (µm)", value=float(glob.get("SHOLL_STEP_UM", 2.0)), min_value=0.1, step=0.1, help="Separación entre anillos.")
-
-                saved = st.form_submit_button("💾 Guardar parámetros globales")
-                if saved:
-                    try:
-                        # limpiar claves antiguas
-                        glob.pop("MAX_DILATION_ITERATIONS", None)
-                        glob.pop("GFAP_INTENSITY_THRESHOLD", None)
-                        glob.pop("MICROGLIA_INTENSITY_THRESHOLD", None)
-                            
-                        calib_path.write_text(json.dumps(glob, indent=2))
-                        st.success("Parámetros guardados en calibration.json")
-                        st.rerun() # Recargar para que la UI refleje los cambios
-                    except Exception as e:
-                        st.error(f"No se pudieron guardar parámetros: {e}")
-
-            # Ejecución global del experimento
+            # Ejecución global
             st.markdown("<div class='sidebar-sep'></div>", unsafe_allow_html=True)
-            st.markdown("**Ejecución global**")
-            with st.form("__global_run__"):
-                scope_opt = st.selectbox("Ámbito", options=["Grupo CTL", "Grupo Hipoxia", "Todos"], index=2)
-                start_from = st.selectbox("Correr desde paso", options=["01", "02", "03", "04", "05"], index=0, help="Recomputa desde el paso elegido y continúa hasta el final")
-                overwrite = st.checkbox("Sobrescribir desde el paso", value=True)
-                submit = st.form_submit_button("⚙️ Correr experimento (selección)")
+            st.markdown("**▶️ Ejecución Batch**")
+            
+            with st.form("__batch_run__"):
+                st.caption("Ejecutar pipeline completo sobre múltiples preparados")
+                
+                scope_opt = st.selectbox(
+                    "Ámbito de ejecución",
+                    options=["📁 Todos los preparados", "🔵 Solo grupo CTL", "🔴 Solo grupo Hipoxia"],
+                    index=0,
+                    help="Selecciona qué preparados procesar"
+                )
+                
+                start_from = st.selectbox(
+                    "Comenzar desde paso",
+                    options=["01", "02", "03", "04"],
+                    index=0,
+                    help="Paso inicial del pipeline (recomputa desde aquí)"
+                )
+                
+                overwrite = st.checkbox(
+                    "Sobrescribir archivos existentes",
+                    value=True,
+                    help="Si está desmarcado, solo procesa preparados sin salidas"
+                )
+                
+                submit = st.form_submit_button("⚙️ Ejecutar pipeline", use_container_width=True)
+                
                 if submit:
                     try:
-                        # Importar el runner aquí para evitar importación circular
-                        from ui import runner 
-                        root_repo = Path(__file__).resolve().parents[2]  # repo root (para data/raw)
-                        cal_path = Path(__file__).resolve().parents[1] / "calibration.json"
-                        cal = _read_global_calibration(cal_path) # Usar la función local
+                        from ui import runner
                         
-                        scope = "all"
-                        group = None
-                        if scope_opt.startswith("Grupo CTL"):
-                            scope = "group"; group = "CTL"
-                        elif scope_opt.startswith("Grupo Hipoxia"):
-                            scope = "group"; group = "Hipoxia"
+                        root_repo = Path(__file__).resolve().parents[2]
+                        cal = _read_global_calibration(calib_path)
                         
-                        # Pasar st para la barra de progreso
-                        res = runner.run_scope(root_repo, scope=scope, start_step=start_from, cal=cal, selected=None, group=group, overwrite_from_step=overwrite, st_progress_bar=st)
-                        ok = sum(1 for _, stt in res if not stt.get("error"))
-                        st.success(f"Ejecución completada: {ok}/{len(res)} preparados procesados.")
+                        # Parsear ámbito
+                        if "CTL" in scope_opt:
+                            scope, group = "group", "CTL"
+                        elif "Hipoxia" in scope_opt:
+                            scope, group = "group", "Hipoxia"
+                        else:
+                            scope, group = "all", None
+                        
+                        # Ejecutar con barra de progreso
+                        res = runner.run_scope(
+                            root_repo, 
+                            scope=scope, 
+                            start_step=start_from, 
+                            cal=cal, 
+                            selected=None, 
+                            group=group, 
+                            overwrite_from_step=overwrite
+                        )
+                        
+                        # Resumen de resultados
+                        ok = sum(1 for _, status in res if not status.get("error"))
+                        total = len(res)
+                        
+                        if ok == total:
+                            st.success(f"✅ {ok}/{total} preparados procesados exitosamente")
+                        else:
+                            st.warning(f"⚠️ {ok}/{total} preparados completados ({total-ok} con errores)")
+                            
                     except Exception as e:
-                        st.error(f"No se pudo ejecutar: {e}")
+                        st.error(f"❌ Error en ejecución: {e}")
                         st.exception(e)

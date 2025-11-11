@@ -7,6 +7,7 @@ import tifffile
 import subprocess
 import os
 from ui.sidebar import render_sidebar
+from ui.utils import detect_group
 
 # set_page_config debe definirse solo una vez en la app (en Home.py)
 st.title("Calibración y Visualización de los Preparados")
@@ -105,63 +106,6 @@ def read_calibration_from_tiff(tif_path: Path):
     return z_um, y_um, x_um
 
 
-def read_calibration_from_lif(lif_path: Path):
-    """Lee metadatos de un archivo Leica .lif intentando múltiples APIs de readlif.
-    Devuelve (z_um, y_um, x_um) o (None, None, None) si no se encuentran.
-    """
-    z_um = y_um = x_um = None
-    # 1) API nueva: readlif.reader.LifFile
-    try:
-        from readlif.reader import LifFile  # type: ignore
-        lif = LifFile(str(lif_path))
-        # Intentar obtener escala desde el primer objeto imagen si estuviera disponible
-        try:
-            img0 = lif.get_image(0)
-            scale = getattr(img0, 'scale', None) or getattr(img0, 'scales', None)
-        except Exception:
-            scale = None
-        if scale is None:
-            # Algunos exponen metadata en el propio LifFile
-            scale = getattr(lif, 'scale', None)
-        if scale is not None and len(scale) >= 3:
-            z_um = float(scale[0]) if scale[0] is not None else None
-            y_um = float(scale[1]) if scale[1] is not None else None
-            x_um = float(scale[2]) if scale[2] is not None else None
-            return z_um, y_um, x_um
-    except Exception:
-        pass
-    # 2) API vieja: readlif.Reader
-    try:
-        import readlif  # type: ignore
-        if hasattr(readlif, 'Reader'):
-            rdr = readlif.Reader(str(lif_path))
-            try:
-                series_list = rdr.getSeries() if hasattr(rdr, 'getSeries') else None
-            except Exception:
-                series_list = None
-            series0 = series_list[0] if series_list else None
-            scale = None
-            if series0 is not None:
-                scale = getattr(series0, 'scale', None)
-                if scale is None:
-                    info = getattr(series0, 'info', None)
-                    if isinstance(info, dict):
-                        scale = info.get('scale')
-            if scale is None:
-                try:
-                    img0 = rdr.get_image(0)
-                    scale = getattr(img0, 'scale', None)
-                except Exception:
-                    pass
-            if scale is not None and len(scale) >= 3:
-                z_um = float(scale[0]) if scale[0] is not None else None
-                y_um = float(scale[1]) if scale[1] is not None else None
-                x_um = float(scale[2]) if scale[2] is not None else None
-    except Exception:
-        pass
-    return z_um, y_um, x_um
-
-
 def load_overrides():
     if overrides_path.exists():
         try:
@@ -188,19 +132,7 @@ if not all_files:
     st.warning("No se encontraron archivos .tif/.tiff en data/raw.")
     st.stop()
 
-def _detect_group(p: Path) -> str:
-    try:
-        rel = str(p.relative_to(root)).lower()
-    except Exception:
-        rel = str(p).lower()
-    if "/hip/" in rel:
-        return "Hipoxia"
-    if "/ctl/" in rel:
-        return "CTL"
-    # Por defecto, asumimos CTL
-    return "CTL"
-
-groups = [_detect_group(p) for p in all_files]
+groups = [detect_group(p, root) for p in all_files]
 g_ctl = sum(1 for g in groups if g == "CTL")
 g_hip = sum(1 for g in groups if g == "Hipoxia")
 
@@ -214,7 +146,7 @@ group_filter = st.session_state.get("group_filter", "Todos")
 if group_filter == "Todos":
     files_avail = all_files
 else:
-    files_avail = [p for p in all_files if _detect_group(p) == group_filter]
+    files_avail = [p for p in all_files if detect_group(p, root) == group_filter]
 if not files_avail:
     st.info("No hay preparados para el grupo seleccionado.")
     st.stop()
@@ -223,7 +155,7 @@ if not files_avail:
 labels = [str(p.relative_to(root)) for p in files_avail]
 idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))), format_func=lambda i: labels[i])
 img_path = files_avail[idx]
-sel_group = _detect_group(img_path)
+sel_group = detect_group(img_path, root)
 def _group_badge_html(group: str) -> str:
     color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
@@ -263,7 +195,12 @@ with open_col:
     if st.button("🧪 Abrir en Napari con esta calibración"):
         # Abrimos Napari en un proceso separado para no bloquear Streamlit
         env = os.environ.copy()
-        cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z_in), "--y", str(y_in), "--x", str(x_in)]
+        # Obtener índices de canales desde calibración
+        cal = json.loads(overrides_path.read_text()) if overrides_path.exists() else {}
+        dapi_idx = int(cal.get("DAPI_CHANNEL_INDEX", 0))
+        gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
+        cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z_in), "--y", str(y_in), "--x", str(x_in),
+               "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
         try:
             env["NAPARI_DISABLE_PLUGIN_AUTOLOAD"] = "1"
             subprocess.Popen(cmd, env=env)

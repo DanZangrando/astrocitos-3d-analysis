@@ -13,7 +13,7 @@ import streamlit as st # Para mostrar progreso en el recalculado
 from . import pipeline
 # -------------------------------------------
 
-Step = Literal["01", "02", "03", "04", "05"]
+Step = Literal["01", "02", "03", "04"]
 
 
 def read_calibration(calib_path: Path) -> dict:
@@ -60,16 +60,16 @@ def run_pipeline_for(
         name_map = {
             "01": "01_otsu_mask.tif",
             "02": "02_cellpose_mask.tif",
-            "03": "03_gfap_microglia_filtered_mask.tif",
+            "03": "03_gfap_filtered_mask.tif",
             "04": "04_final_astrocytes_mask.tif",
-            "05": "05_skeleton_labels.tif",
-            "sholl_csv": "sholl.csv",
+            "skeleton_2d": "05_skeleton_labels_2d.tif",
+            "sholl_csv": "sholl_2d_native.csv",
             "summary_csv": "skeletons/summary.csv"
         }
         return out_dir / name_map[step_id]
 
     def need(step: Step) -> bool:
-        order = {"01":1, "02":2, "03":3, "04":4, "05":5}
+        order = {"01":1, "02":2, "03":3, "04":4}
         # Si no existe, siempre se necesita
         if not get_path(step).exists():
             return order[step] >= order[start_step]
@@ -86,11 +86,9 @@ def run_pipeline_for(
     
     dapi_idx = int(cal.get("DAPI_CHANNEL_INDEX", 0))
     gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1 if nC > 1 else 0))
-    micro_idx = int(cal.get("MICROGLIA_CHANNEL_INDEX", 2 if nC > 2 else max(1, nC-1)))
     
     dapi = vol[:, dapi_idx, :, :]
     gfap = vol[:, gfap_idx, :, :]
-    micro = vol[:, micro_idx, :, :]
     
     # --- Parámetros ---
     nucleus_diam = int(cal.get("NUCLEUS_DIAMETER", 30))
@@ -112,7 +110,7 @@ def run_pipeline_for(
         
         pipeline.run_cellpose_and_save(dapi_in, out_dir, nucleus_diameter=nucleus_diam, use_gpu=use_gpu)
 
-    # --- 03 Filtrado (GFAP/Micro/Tamaño) ---
+    # --- 03 Filtrado (GFAP/Tamaño) ---
     if need("03"):
         if not get_path("02").exists():
             raise FileNotFoundError(f"Falta 02_cellpose_mask.tif para {img_path.stem}")
@@ -125,37 +123,25 @@ def run_pipeline_for(
         
         cp_masks = tifffile.imread(get_path("02"))
         
-        # 03a - Filtro GFAP/Micro (relativo)
+        # 03a - Filtro GFAP (relativo)
         gfap_filtered_mask, _ = pipeline.run_filter_and_save(
-            cp_masks, gfap, micro, otsu_mask, cal, out_dir
+            cp_masks, gfap, otsu_mask, cal, out_dir
         )
         
         # 03b - Filtro por Tamaño
         pipeline.run_size_filter_and_save(gfap_filtered_mask, cal, out_dir)
 
-    # --- 04 Esqueletización (Avanzada) ---
+    # --- 04 Esqueletización + Sholl (Unificado 2D) ---
     if need("04"):
         if not get_path("04").exists():
              raise FileNotFoundError(f"Falta 04_final_astrocytes_mask.tif para {img_path.stem}")
         
-        pipeline.run_advanced_skeleton_and_save(
+        # Pipeline unificado: esqueletización + Sholl en un solo paso
+        pipeline.run_unified_2d_skeleton_and_sholl(
             img_path=img_path,
             mask_path=get_path("04"),
             out_dir=out_dir,
-            cal=cal,
-            conflict_resolve=bool(cal.get("SKELETON_CONFLICT_RESOLVE", True))
-        )
-
-    # --- 05 Sholl ---
-    if need("05"):
-        if not get_path("05").exists() or not get_path("04").exists():
-            raise FileNotFoundError(f"Faltan 04_final... o 05_skeleton... para Sholl en {img_path.stem}")
-        
-        pipeline.run_sholl_and_save(
-            out_dir=out_dir,
-            cal=cal,
-            restrict_to_final=True,
-            save_rings_json=True
+            cal=cal
         )
 
     return {
@@ -163,9 +149,9 @@ def run_pipeline_for(
         "cellpose": get_path("02").exists(),
         "gfap": get_path("03").exists(),
         "final": get_path("04").exists(),
-        "skeleton": get_path("05").exists(),
+        "skeleton_2d": get_path("skeleton_2d").exists(),
         "summary": (out_dir / "skeletons" / "summary.csv").exists(),
-        "sholl": (out_dir / "sholl.csv").exists(),
+        "sholl": (out_dir / "sholl_2d_native.csv").exists(),
     }
 
 

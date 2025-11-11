@@ -10,6 +10,7 @@ from skimage.measure import regionprops
 import pandas as pd
 import altair as alt
 from ui.sidebar import render_sidebar
+from ui.utils import detect_group
 # --- Importar la lógica unificada ---
 from ui import pipeline, runner
 
@@ -43,21 +44,13 @@ def get_output_dir_for_image(img_path: Path) -> Path:
 def existing_results(out_dir: Path) -> dict:
     return {
         "cellpose": (out_dir / "02_cellpose_mask.tif").exists(),
-        "gfap_filtered": (out_dir / "03_gfap_microglia_filtered_mask.tif").exists(),
+        "gfap_filtered": (out_dir / "03_gfap_filtered_mask.tif").exists(),
         "final_mask": (out_dir / "04_final_astrocytes_mask.tif").exists(),
         "nucleus_metrics": (out_dir / "03_nucleus_metrics.csv").exists(),
     }
 
 def _detect_group(p: Path, root: Path) -> str:
-    try:
-        rel = str(p.relative_to(root)).lower()
-    except Exception:
-        rel = str(p).lower()
-    if "/hip/" in rel:
-        return "Hipoxia"
-    if "/ctl/" in rel:
-        return "CTL"
-    return "CTL"
+    return detect_group(p, root)
 
 # --------- 1) Selección de imagen ---------
 files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
@@ -121,25 +114,17 @@ except Exception as e:
     st.warning(f"No se pudo precargar la imagen: {e}")
 
 st.markdown("### Selección de canales")
-cc1, cc2 = st.columns(2)
-with cc1:
-    gfap_default = int(glob_calib.get("GFAP_CHANNEL_INDEX", 1 if n_channels > 1 else 0))
-    gfap_default = min(max(0, gfap_default), max(0, n_channels-1))
-    gfap_idx = st.number_input("Índice de canal GFAP", value=int(gfap_default), min_value=0, max_value=max(0, n_channels-1), step=1)
-with cc2:
-    micro_default = int(glob_calib.get("MICROGLIA_CHANNEL_INDEX", 2 if n_channels > 2 else min(1, n_channels-1)))
-    micro_default = min(max(0, micro_default), max(0, n_channels-1))
-    micro_idx = st.number_input("Índice de canal Microglía", value=int(micro_default), min_value=0, max_value=max(0, n_channels-1), step=1)
+gfap_default = int(glob_calib.get("GFAP_CHANNEL_INDEX", 1 if n_channels > 1 else 0))
+gfap_default = min(max(0, gfap_default), max(0, n_channels-1))
+gfap_idx = st.number_input("Índice de canal GFAP", value=int(gfap_default), min_value=0, max_value=max(0, n_channels-1), step=1)
 
-st.markdown("### Parámetros de filtrado (GFAP / Microglía)")
+st.markdown("### Parámetros de filtrado (GFAP)")
 st.info("Usamos umbrales **relativos** (desviaciones estándar sobre el fondo) para mayor robustez científica.")
-fcol1, fcol2, fcol3 = st.columns(3)
+fcol1, fcol2 = st.columns(2)
 with fcol1:
     shell_radius_um = st.number_input("Radio del 'Shell' (µm)", value=float(glob_calib.get("SHELL_RADIUS_UM", 2.0)), min_value=0.1, step=0.1)
 with fcol2:
     gfap_std_thr = st.number_input("Umbral GFAP (N° StdDev)", value=float(glob_calib.get("GFAP_STD_DEV_THRESHOLD", 3.0)), min_value=0.0, step=0.1)
-with fcol3:
-    micro_std_thr = st.number_input("Umbral Microglía (N° StdDev)", value=float(glob_calib.get("MICROGLIA_STD_DEV_THRESHOLD", 5.0)), min_value=0.0, step=0.1)
 
 st.markdown("### Filtro por tamaño (volumen físico)")
 min_volume_um3 = st.number_input("Volumen mínimo (µm³)", value=int(glob_calib.get("MIN_VOLUME_UM3", 75)), min_value=0, step=1)
@@ -148,10 +133,8 @@ save_experiment_params = st.button("💾 Guardar parámetros del experimento (gl
 if save_experiment_params:
     glob_calib.update({
         "GFAP_CHANNEL_INDEX": int(gfap_idx),
-        "MICROGLIA_CHANNEL_INDEX": int(micro_idx),
         "SHELL_RADIUS_UM": float(shell_radius_um),
         "GFAP_STD_DEV_THRESHOLD": float(gfap_std_thr),
-        "MICROGLIA_STD_DEV_THRESHOLD": float(micro_std_thr),
         "MIN_VOLUME_UM3": int(min_volume_um3),
     })
     _save_global_calibration(glob_calib)
@@ -159,14 +142,13 @@ if save_experiment_params:
 
 # --------- 3) Lógica de filtrado (REFACTORIZADA) ---------
 st.markdown("### Ejecutar Filtrado (Para el preparado actual)")
-run_filter = st.button("🔬 Ejecutar filtrado GFAP/Microglía y Tamaño")
+run_filter = st.button("🔬 Ejecutar filtrado GFAP y Tamaño")
 
 @st.cache_data(show_spinner="Cargando canales y máscaras...")
-def load_data_for_filtering(img_path, out_dir, gfap_idx, micro_idx):
+def load_data_for_filtering(img_path, out_dir, gfap_idx):
     arr, axes = pipeline.load_image_any(img_path)
     vol = pipeline.reorder_to_zcyx(arr, axes)
     gfap_channel = vol[:, int(gfap_idx), :, :]
-    microglia_channel = vol[:, int(micro_idx), :, :]
     
     otsu_path = out_dir / "01_otsu_mask.tif"
     cellpose_path = out_dir / "02_cellpose_mask.tif"
@@ -178,36 +160,34 @@ def load_data_for_filtering(img_path, out_dir, gfap_idx, micro_idx):
         
     otsu_mask = tifffile.imread(otsu_path)
     cellpose_masks = tifffile.imread(cellpose_path)
-    return cellpose_masks, gfap_channel, microglia_channel, otsu_mask
+    return cellpose_masks, gfap_channel, otsu_mask
 
 if run_filter:
     try:
         # 1. Guardar los parámetros de la UI en calibration.json
         glob_calib.update({
             "GFAP_CHANNEL_INDEX": int(gfap_idx),
-            "MICROGLIA_CHANNEL_INDEX": int(micro_idx),
             "SHELL_RADIUS_UM": float(shell_radius_um),
             "GFAP_STD_DEV_THRESHOLD": float(gfap_std_thr),
-            "MICROGLIA_STD_DEV_THRESHOLD": float(micro_std_thr),
             "MIN_VOLUME_UM3": int(min_volume_um3),
         })
         _save_global_calibration(glob_calib)
         st.info("Parámetros de UI guardados en calibration.json")
         
         # 2. Cargar los datos necesarios
-        data = load_data_for_filtering(img_path, out_dir, gfap_idx, micro_idx)
+        data = load_data_for_filtering(img_path, out_dir, gfap_idx)
         
         if data:
-            cellpose_masks, gfap_channel, microglia_channel, otsu_mask = data
+            cellpose_masks, gfap_channel, otsu_mask = data
             
             # 3. Ejecutar SOLO el Paso 03 (Filtrado)
             with st.spinner("Ejecutando Paso 03 (Filtrado relativo)..."):
                 gfap_filtered_mask, df_metrics = pipeline.run_filter_and_save(
-                    cellpose_masks, gfap_channel, microglia_channel, 
+                    cellpose_masks, gfap_channel, 
                     otsu_mask, glob_calib, out_dir
                 )
             n_kept = int((df_metrics["is_astrocyte_candidate"]).sum())
-            st.success(f"Filtro GFAP/Microglía guardado. {n_kept} candidatos retenidos.")
+            st.success(f"Filtro GFAP guardado. {n_kept} candidatos retenidos.")
             
             # 4. Ejecutar SOLO el Paso 04 (Tamaño)
             with st.spinner("Ejecutando Paso 04 (Filtro por tamaño)…"):
@@ -228,12 +208,15 @@ open_napari_with_masks = st.button("🧪 Abrir en Napari con máscaras disponibl
 def _launch_napari(include_masks: bool):
     env = os.environ.copy()
     z = float(glob_calib.get('z', 1.0)); y = float(glob_calib.get('y', 0.3)); x = float(glob_calib.get('x', 0.3))
-    cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x)]
+    dapi_idx = int(glob_calib.get("DAPI_CHANNEL_INDEX", 0))
+    gfap_idx = int(glob_calib.get("GFAP_CHANNEL_INDEX", 1))
+    cmd = [sys.executable, str(napari_script), "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x),
+           "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
     if include_masks:
         paths = {
             "--otsu": out_dir / "01_otsu_mask.tif",
             "--cellpose": out_dir / "02_cellpose_mask.tif",
-            "--gfap": out_dir / "03_gfap_microglia_filtered_mask.tif",
+            "--gfap": out_dir / "03_gfap_filtered_mask.tif",
             "--final": out_dir / "04_final_astrocytes_mask.tif"
         }
         for flag, p in paths.items():
@@ -274,11 +257,11 @@ def render_metrics_section():
 
     mcol1, mcol2, mcol3 = st.columns(3)
     mcol1.metric("Núcleos (Cellpose)", n_cellpose)
-    mcol2.metric("Candidatos (GFAP/Micro)", n_gfap, delta=f"{ret_gfap:.1f}% retenidos")
+    mcol2.metric("Candidatos (GFAP)", n_gfap, delta=f"{ret_gfap:.1f}% retenidos")
     mcol3.metric("Astrocitos (Tamaño)", n_final, delta=f"−{drop_final}" if drop_final > 0 else None)
 
     chart_df = pd.DataFrame({
-        "Etapa": ["Cellpose", "GFAP/Microglía", "Final (Volumen)"],
+        "Etapa": ["Cellpose", "GFAP", "Final (Volumen)"],
         "Cantidad": [n_cellpose, n_gfap, n_final]
     })
     bar = alt.Chart(chart_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
@@ -307,9 +290,9 @@ def render_metrics_section():
     st.markdown("#### Espacio de Características del Filtrado")
     scatter_filt = alt.Chart(df_metrics).mark_circle(opacity=0.7).encode(
         x=alt.X("shell_gfap_mean:Q", title="GFAP Medio (Shell)"),
-        y=alt.Y("shell_microglia_mean:Q", title="Microglía Media (Shell)"),
+        y=alt.Y("nucleus_volume_um3:Q", title="Volumen Núcleo (µm³)"),
         color=alt.Color("is_astrocyte_candidate:N", title="Candidato"),
-        tooltip=["label", "shell_gfap_mean", "shell_microglia_mean", "is_astrocyte_candidate"]
+        tooltip=["label", "shell_gfap_mean", "nucleus_volume_um3", "is_astrocyte_candidate"]
     ).interactive().properties(height=300)
     st.altair_chart(scatter_filt, use_container_width=True)
 

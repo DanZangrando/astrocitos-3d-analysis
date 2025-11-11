@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
 PROC_DIR = ROOT / "data" / "processed"
 
-st.title("Comparaciones globales entre grupos")
+st.title("Comparación entre Grupos (CTL vs Hipoxia)")
 render_sidebar(show_calibration=True)
 apply_theme(st)
 
@@ -114,15 +114,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         od = proc_dir / p.stem
         group = detect_group_from_path(p)
         
-        # 1. Cargar métricas de esqueleto (summary.csv)
-        ps = od / "skeletons" / "summary.csv"
-        if ps.exists():
-            try:
-                df = pd.read_csv(ps); df['prepared'] = p.name; df['group'] = group
-                rows_skel.append(df)
-            except Exception: pass
-        
-        # 2. Cargar métricas de Sholl (sholl_summary.csv)
+        # 1. Cargar métricas de Sholl 2D (sholl_2d_native.csv + sholl_summary.csv)
         pss = od / "sholl_summary.csv"
         if pss.exists():
             try:
@@ -130,7 +122,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
                 rows_sholl.append(df)
             except Exception: pass
             
-        # 3. Cargar métricas de núcleo (03_nucleus_metrics.csv)
+        # 2. Cargar métricas de núcleo (03_nucleus_metrics.csv)
         pn = od / "03_nucleus_metrics.csv"
         if pn.exists():
             try:
@@ -138,24 +130,17 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
                 rows_nuc.append(df)
             except Exception: pass
 
-    if not rows_skel and not rows_sholl and not rows_nuc:
+    if not rows_sholl and not rows_nuc:
         return None, None
 
     # --- Fusión y Agregación ---
     df_nuc_all = pd.concat(rows_nuc, ignore_index=True) if rows_nuc else pd.DataFrame()
-    df_skel_all = pd.concat(rows_skel, ignore_index=True) if rows_skel else pd.DataFrame()
     df_sholl_all = pd.concat(rows_sholl, ignore_index=True) if rows_sholl else pd.DataFrame()
     
     # Unir métricas por célula (label + prepared)
     df_por_celula = pd.DataFrame()
-    if not df_skel_all.empty:
-        df_por_celula = df_skel_all
-        if not df_sholl_all.empty:
-            # Asegurarse de que 'label' sea del mismo tipo si existe en ambos
-            if 'label' in df_por_celula.columns and 'label' in df_sholl_all.columns:
-                 df_por_celula['label'] = df_por_celula['label'].astype(int)
-                 df_sholl_all['label'] = df_sholl_all['label'].astype(int)
-            df_por_celula = pd.merge(df_por_celula, df_sholl_all, on=['label', 'prepared', 'group'], how='left')
+    if not df_sholl_all.empty:
+        df_por_celula = df_sholl_all
     
     # Unir métricas de núcleo
     if not df_nuc_all.empty:
@@ -165,7 +150,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         
         if not df_por_celula.empty and 'label' in df_por_celula.columns:
              df_por_celula = pd.merge(df_por_celula, df_nuc_astros, on=['label', 'prepared', 'group'], how='left')
-        elif df_por_celula.empty: # Si no hay esqueleto, al menos usar los núcleos
+        elif df_por_celula.empty: # Si no hay Sholl, al menos usar los núcleos
              df_por_celula = df_nuc_astros
         
     if df_por_celula.empty:
@@ -177,9 +162,6 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
     
     # 2. DataFrame para estadística (mediana por preparado)
     cols_to_agg = [
-        'total_length_um', 'n_branches', 'n_junctions', 'n_endpoints', 
-        'mean_branch_len_um', 'mean_tortuosity', 'domain_volume_um3',
-        'tube_mean_intensity', 'local_radius_um_median', 
         'critical_radius_um', 'peak_intersections', 'auc',
         'nucleus_volume_um3', 'nucleus_sphericity'
     ]
@@ -202,20 +184,11 @@ if df_plot is None or df_stats is None:
 # --- Definir métricas disponibles para comparar ---
 METRIC_OPTIONS = {
     # Métrica: (Nombre Bonito, Unidad)
-    'total_length_um': ("Longitud Total", "µm"),
-    'n_branches': ("N° de Ramas", ""),
-    'mean_tortuosity': ("Tortuosidad Media", ""),
-    'domain_volume_um3': ("Volumen de Dominio", "µm³"),
     'auc': ("Sholl (AUC)", "µm·intersec"),
     'peak_intersections': ("Sholl (Pico)", "intersec"),
     'critical_radius_um': ("Sholl (Radio Crítico)", "µm"),
     'nucleus_volume_um3': ("Volumen del Núcleo", "µm³"),
     'nucleus_sphericity': ("Esfericidad del Núcleo", "0-1"),
-    'n_junctions': ("N° de Junturas", ""),
-    'n_endpoints': ("N° de Puntas", ""),
-    'mean_branch_len_um': ("Longitud Media de Rama", "µm"),
-    'tube_mean_intensity': ("Intensidad Media (Tubo)", "a.u."),
-    'local_radius_um_median': ("Radio Local Mediano", "µm"),
 }
 
 # Filtrar opciones basadas en las columnas que realmente existen

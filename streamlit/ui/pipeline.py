@@ -32,10 +32,13 @@ except Exception:
         return out
 
 try:
-    from skan import Skeleton, summarize as sk_summarize
+    from skan import Skeleton, summarize as sk_summarize, sholl_analysis as skan_sholl
+    import skan
 except Exception:
     sk_summarize = None
     Skeleton = None
+    skan_sholl = None
+    skan = None
 
 # --- PASO 0: Utilidades de Carga y Calibración ---
 
@@ -88,6 +91,59 @@ def get_voxel_volume(cal: dict) -> float:
     voxel_vol_um3 = z_um * y_um * x_um
     return voxel_vol_um3 if voxel_vol_um3 > 0 else 1.0
 
+# --- FUNCIONES DE PROYECCIÓN 2D ---
+
+def project_3d_to_2d(volume_3d: np.ndarray, method: str = "max", axis: int = 0) -> np.ndarray:
+    """
+    Proyecta un volumen 3D a una imagen 2D.
+    
+    Parameters:
+    -----------
+    volume_3d : np.ndarray
+        Volumen 3D de entrada
+    method : str
+        Método de proyección: "max", "mean", "sum", "any"
+    axis : int
+        Eje a lo largo del cual proyectar (default: 0 para Z)
+    
+    Returns:
+    --------
+    np.ndarray : Imagen 2D proyectada
+    """
+    if method == "max":
+        return np.max(volume_3d, axis=axis)
+    elif method == "mean":
+        return np.mean(volume_3d, axis=axis)
+    elif method == "sum":
+        return np.sum(volume_3d, axis=axis)
+    elif method == "any":
+        return np.any(volume_3d, axis=axis)
+    else:
+        raise ValueError(f"Método de proyección no soportado: {method}")
+
+def project_mask_labels_2d(mask_labels_3d: np.ndarray, method: str = "max") -> np.ndarray:
+    """
+    Proyecta máscaras con labels preservando las etiquetas.
+    Para máscaras con labels, usa método inteligente para preservar información.
+    """
+    if method in ["max", "any"]:
+        # Para labels, buscar el label más frecuente por pixel en Z
+        projection = np.zeros(mask_labels_3d.shape[1:], dtype=mask_labels_3d.dtype)
+        
+        for y in range(mask_labels_3d.shape[1]):
+            for x in range(mask_labels_3d.shape[2]):
+                z_vals = mask_labels_3d[:, y, x]
+                non_zero = z_vals[z_vals > 0]
+                if len(non_zero) > 0:
+                    # Tomar el label más frecuente o el primero si hay empate
+                    unique, counts = np.unique(non_zero, return_counts=True)
+                    projection[y, x] = unique[np.argmax(counts)]
+        
+        return projection
+    else:
+        # Para otros métodos, usar proyección simple
+        return project_3d_to_2d(mask_labels_3d, method)
+
 # --- PASO 1: Otsu ---
 
 def run_otsu_and_save(dapi_vol: np.ndarray, out_dir: Path) -> Tuple[np.ndarray, float]:
@@ -130,8 +186,15 @@ def _calculate_background_stats(channel: np.ndarray, otsu_mask: np.ndarray) -> T
     bg_std = float(np.std(background_voxels))
     return bg_mean, (bg_std if bg_std > 1e-6 else 1.0) 
 
-def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, microglia_channel, se, gfap_decision_thr, micro_decision_thr, voxel_vol_um3):
-    """Función worker para procesar un solo núcleo (usada por ProcessPoolExecutor)."""
+def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, se, gfap_decision_thr, voxel_vol_um3):
+    """
+    Función worker para procesar un solo núcleo (usada por ProcessPoolExecutor).
+    
+    Filtrado basado únicamente en la intensidad de GFAP en el shell perinuclear.
+    
+    ESFERICIDAD: Se calcula en 2D a partir de la proyección MIP del núcleo 3D.
+    Usa la fórmula de circularidad: 4π * area / perimeter²
+    """
     label = nucleus_props.label
     nucleus_mask = (cellpose_masks == label)
     
@@ -139,32 +202,40 @@ def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, microgl
     shell_mask = dilated_mask & ~nucleus_mask
     
     shell_gfap_intensity = 0.0
-    shell_microglia_intensity = 0.0
     
     if np.any(shell_mask):
         shell_gfap_intensity = float(gfap_channel[shell_mask].mean())
-        shell_microglia_intensity = float(microglia_channel[shell_mask].mean())
     
-    is_astrocyte = (
-        shell_gfap_intensity > gfap_decision_thr and 
-        shell_microglia_intensity < micro_decision_thr
-    )
+    # Decisión basada SOLO en GFAP
+    is_astrocyte = shell_gfap_intensity > gfap_decision_thr
     
     volume_vox = nucleus_props.area
     volume_um3 = float(volume_vox) * voxel_vol_um3
-    sphericity = np.nan
-    if hasattr(nucleus_props, 'surface_area') and nucleus_props.surface_area > 0:
-        try:
-            sphericity = (np.pi**(1/3) * (6 * volume_vox)**(2/3)) / nucleus_props.surface_area
-        except (ValueError, ZeroDivisionError):
-            pass
+    
+    # --- CÁLCULO DE ESFERICIDAD EN 2D (Circularidad) ---
+    # Proyección MIP del núcleo
+    nucleus_2d = np.max(nucleus_mask, axis=0).astype(np.uint8)
+    
+    sphericity_2d = np.nan
+    if np.any(nucleus_2d):
+        # Calcular propiedades en 2D
+        props_2d = regionprops(nucleus_2d)
+        if len(props_2d) > 0:
+            area_2d = props_2d[0].area
+            perimeter_2d = props_2d[0].perimeter
+            
+            if perimeter_2d > 0:
+                # Circularidad 2D: 4π * area / perimeter²
+                # Valor = 1 para círculo perfecto, < 1 para formas irregulares
+                sphericity_2d = (4.0 * np.pi * area_2d) / (perimeter_2d ** 2)
+                # Limitar al rango [0, 1] para evitar artefactos de discretización
+                sphericity_2d = min(sphericity_2d, 1.0)
 
     metric_dict = {
         "label": label,
         "nucleus_volume_um3": volume_um3,
-        "nucleus_sphericity": sphericity,
+        "nucleus_sphericity": sphericity_2d,  # Circularidad 2D
         "shell_gfap_mean": shell_gfap_intensity,
-        "shell_microglia_mean": shell_microglia_intensity,
         "is_astrocyte_candidate": is_astrocyte
     }
     
@@ -174,7 +245,6 @@ def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, microgl
 def run_filter_and_save(
     cellpose_masks: np.ndarray, 
     gfap_channel: np.ndarray, 
-    microglia_channel: np.ndarray,
     otsu_mask: np.ndarray,
     cal: dict,
     out_dir: Path
@@ -182,6 +252,8 @@ def run_filter_and_save(
     """
     Filtra núcleos de Cellpose basado en umbrales relativos (std dev) 
     en un shell alrededor del núcleo. (Ejecución PARALELIZADA)
+    
+    Filtrado basado únicamente en la señal de GFAP en el shell perinuclear.
     """
     
     z_um, y_um, x_um = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
@@ -199,17 +271,13 @@ def run_filter_and_save(
     se[mask_struct] = 1
 
     gfap_std_thr = float(cal.get("GFAP_STD_DEV_THRESHOLD", 3.0))
-    micro_std_thr = float(cal.get("MICROGLIA_STD_DEV_THRESHOLD", 5.0))
 
     gfap_bg_mean, gfap_bg_std = _calculate_background_stats(gfap_channel, otsu_mask)
-    micro_bg_mean, micro_bg_std = _calculate_background_stats(microglia_channel, otsu_mask)
     
     gfap_decision_thr = gfap_bg_mean + (gfap_std_thr * gfap_bg_std)
-    micro_decision_thr = micro_bg_mean + (micro_std_thr * micro_bg_std)
 
-    print(f"--- Filtrado Relativo ---")
+    print(f"--- Filtrado Relativo (Solo GFAP) ---")
     print(f"GFAP Fondo: {gfap_bg_mean:.2f} ± {gfap_bg_std:.2f}. Umbral Decisión: > {gfap_decision_thr:.2f}")
-    print(f"Micro Fondo: {micro_bg_mean:.2f} ± {micro_bg_std:.2f}. Umbral Decisión: < {micro_decision_thr:.2f}")
 
     nuclei_props = regionprops(cellpose_masks)
     astrocyte_labels = []
@@ -219,10 +287,8 @@ def run_filter_and_save(
         _process_nucleus_filter,
         cellpose_masks=cellpose_masks,
         gfap_channel=gfap_channel,
-        microglia_channel=microglia_channel,
         se=se,
         gfap_decision_thr=gfap_decision_thr,
-        micro_decision_thr=micro_decision_thr,
         voxel_vol_um3=voxel_vol_um3
     )
     
@@ -235,7 +301,14 @@ def run_filter_and_save(
         metrics_data.append(metric_dict)
 
     gfap_filtered_mask = np.where(np.isin(cellpose_masks, astrocyte_labels), cellpose_masks, 0)
-    tifffile.imwrite(out_dir / "03_gfap_microglia_filtered_mask.tif", gfap_filtered_mask.astype(np.uint16))
+    tifffile.imwrite(out_dir / "03_gfap_filtered_mask.tif", gfap_filtered_mask.astype(np.uint16))
+    
+    # Generar proyección 2D si está habilitada
+    proj_2d_enable = bool(cal.get("PROJECTION_2D_ENABLE", True))
+    if proj_2d_enable:
+        proj_method = str(cal.get("PROJECTION_2D_METHOD", "max")).lower()
+        gfap_filtered_2d = project_mask_labels_2d(gfap_filtered_mask, method=proj_method)
+        tifffile.imwrite(out_dir / "03_gfap_filtered_mask_2d.tif", gfap_filtered_2d.astype(np.uint16))
     
     df_metrics = pd.DataFrame(metrics_data)
     df_metrics.to_csv(out_dir / "03_nucleus_metrics.csv", index=False)
@@ -594,6 +667,258 @@ def _process_skeleton_label(
     return (lab, (z0,y0,x0,z1,y1,x1), skel_roi, dist_um, metric_dict)
 
 
+def run_skeleton_2d_native_skan(
+    mask: np.ndarray,
+    gfap: np.ndarray, 
+    cal: dict,
+    out_dir: Path,
+    territory_expansion_um: float = None
+) -> pd.DataFrame:
+    """
+    Esqueletización 2D nativa usando SKAN después de proyección.
+    Flujo: 3D -> 2D proyección -> SKAN nativo -> métricas oficiales
+    """
+    print("=== ESQUELETIZACIÓN 2D GFAP TERRITORIAL ===")
+    
+    # Obtener parámetro de expansión territorial
+    if territory_expansion_um is None:
+        territory_expansion_um = float(cal.get("TERRITORY_EXPANSION_UM", 10.0))
+    
+    # 1. Proyectar las máscaras 3D a 2D
+    proj_method = str(cal.get("PROJECTION_2D_METHOD", "max")).lower()
+    print(f"Proyectando máscaras 3D a 2D usando método: {proj_method}")
+    print(f"Expansión territorial: {territory_expansion_um:.1f} µm")
+    
+    # Proyectar máscara de núcleos (astrocitos)
+    mask_2d = project_mask_labels_2d(mask, method=proj_method)
+    out_mask_2d = out_dir / "04_final_astrocytes_mask_2d.tif" 
+    tifffile.imwrite(out_mask_2d, mask_2d.astype(np.uint16))
+    
+    # Proyectar canal GFAP
+    gfap_2d = project_3d_to_2d(gfap, method=proj_method)
+    out_gfap_2d = out_dir / "gfap_projection_2d.tif"
+    tifffile.imwrite(out_gfap_2d, gfap_2d.astype(np.float32))
+    
+    # 2. Parámetros para análisis 2D
+    y_um, x_um = float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+    spacing_2d = (y_um, x_um)
+    
+    # Calcular radio de expansión en píxeles
+    expansion_radius_px_y = int(territory_expansion_um / y_um)
+    expansion_radius_px_x = int(territory_expansion_um / x_um)
+    
+    skel_dir = out_dir / "skeletons"
+    skel_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Obtener labels únicos (núcleos)
+    labels = np.unique(mask_2d)
+    labels = labels[labels > 0]
+    
+    all_metrics = []
+    combined_skeleton_2d = np.zeros_like(mask_2d, dtype=np.uint16)
+    
+    print(f"Procesando {len(labels)} astrocitos con territorio expandido...")
+    
+    from skimage.morphology import skeletonize, binary_dilation, disk
+    from skimage.segmentation import find_boundaries
+    import skan
+    
+    for label in labels:
+        try:
+            # 1. Obtener máscara nuclear de este astrocito
+            nuclear_mask = (mask_2d == label).astype(bool)
+            
+            if not np.any(nuclear_mask):
+                continue
+            
+            # 2. Expandir territorio alrededor del núcleo
+            # Usar elemento estructurante elíptico para mejor expansión isotrópica
+            expansion_element = disk(max(expansion_radius_px_y, expansion_radius_px_x))
+            territorial_mask = binary_dilation(nuclear_mask, expansion_element)
+            
+            # 3. Extraer señal GFAP en territorio expandido
+            gfap_territorial = gfap_2d * territorial_mask
+            
+            # 4. Binarizar señal GFAP usando umbralización automática
+            from skimage.filters import threshold_otsu
+            try:
+                gfap_region = gfap_territorial[territorial_mask]
+                if len(gfap_region) > 0 and np.std(gfap_region) > 0:
+                    threshold_val = threshold_otsu(gfap_region)
+                    gfap_binary = gfap_territorial > threshold_val
+                else:
+                    # Si no hay variación, usar percentil
+                    threshold_val = np.percentile(gfap_region, 75) if len(gfap_region) > 0 else 0
+                    gfap_binary = gfap_territorial > threshold_val
+            except:
+                # Fallback: usar percentil 75
+                gfap_region = gfap_territorial[territorial_mask]
+                threshold_val = np.percentile(gfap_region, 75) if len(gfap_region) > 0 else 0
+                gfap_binary = gfap_territorial > threshold_val
+            
+            # 5. Restringir a territorio (quitar ruido externo)
+            gfap_binary = gfap_binary & territorial_mask
+            
+            # 6. Esqueletizar señal GFAP binarizada
+            if not np.any(gfap_binary):
+                print(f"  Astrocito {label}: sin señal GFAP significativa")
+                continue
+                
+            skeleton_binary = skeletonize(gfap_binary)
+            
+            if not np.any(skeleton_binary):
+                print(f"  Astrocito {label}: sin esqueleto GFAP")
+                continue
+            
+            # Convertir a SKAN Skeleton
+            import skan
+            skeleton_obj = skan.Skeleton(skeleton_binary, spacing=spacing_2d)
+            
+            # Obtener métricas nativas de SKAN con separator para evitar warnings
+            summary_stats = skan.summarize(skeleton_obj, separator='_')
+            
+            # Agregar al esqueleto combinado
+            combined_skeleton_2d[skeleton_binary] = label
+            
+            # 7. Extraer métricas principales calculándolas correctamente
+            # SKAN summarize devuelve datos por rama, no métricas agregadas
+            if len(summary_stats) > 0:
+                # Longitud total: sumar todas las branch_distance
+                total_length_um = float(summary_stats['branch_distance'].sum())
+                
+                # Número de ramas: contar filas del summary
+                n_branches = int(len(summary_stats))
+                
+                # Número de junctions: usar grados del skeleton object
+                # Junctions son nodos con grado > 2
+                degrees = skeleton_obj.degrees
+                n_junctions = int(np.sum(degrees > 2))
+            else:
+                total_length_um = 0.0
+                n_branches = 0
+                n_junctions = 0
+            
+            # 8. Métricas territoriales y de área
+            nuclear_area_px = np.sum(nuclear_mask)
+            nuclear_area_um2 = nuclear_area_px * y_um * x_um
+            
+            territorial_area_px = np.sum(territorial_mask) 
+            territorial_area_um2 = territorial_area_px * y_um * x_um
+            
+            gfap_positive_area_px = np.sum(gfap_binary)
+            gfap_positive_area_um2 = gfap_positive_area_px * y_um * x_um
+            
+            # Calcular densidades
+            skeleton_density_territorial = total_length_um / territorial_area_um2 if territorial_area_um2 > 0 else 0.0
+            skeleton_density_gfap = total_length_um / gfap_positive_area_um2 if gfap_positive_area_um2 > 0 else 0.0
+            
+            # Ratio de ocupación GFAP en territorio
+            gfap_occupancy_ratio = gfap_positive_area_um2 / territorial_area_um2 if territorial_area_um2 > 0 else 0.0
+            
+            # Para métricas de tortuosidad, usar datos del skeleton object directamente
+            coords = skeleton_obj.coordinates
+            if len(coords) > 1:
+                # Calcular tortuosidad simple como longitud total / distancia euclidiana máxima
+                coords_scaled = coords * np.array([y_um, x_um])
+                distances = np.linalg.norm(np.diff(coords_scaled, axis=0), axis=1)
+                if len(distances) > 0:
+                    path_length = np.sum(distances)
+                    euclidean_dist = np.linalg.norm(coords_scaled[-1] - coords_scaled[0])
+                    mean_tortuosity = path_length / max(euclidean_dist, 1e-6)
+                    max_tortuosity = mean_tortuosity  # Simplificado
+                else:
+                    mean_tortuosity = max_tortuosity = 1.0
+            else:
+                mean_tortuosity = max_tortuosity = 1.0
+            
+            # Longitud promedio de rama
+            avg_branch_length = total_length_um / max(n_branches, 1)
+            
+            # 9. Construir métricas completas
+            metrics_row = {
+                "label": int(label),
+                "total_length_um": float(total_length_um),
+                "nuclear_area_um2": float(nuclear_area_um2),
+                "territorial_area_um2": float(territorial_area_um2),
+                "gfap_positive_area_um2": float(gfap_positive_area_um2),
+                "territory_area_um2": float(territorial_area_um2),  # Para compatibilidad
+                "skeleton_density_territorial": float(skeleton_density_territorial),
+                "skeleton_density_gfap": float(skeleton_density_gfap), 
+                "skeleton_density_um_per_um2": float(skeleton_density_territorial),  # Para compatibilidad
+                "gfap_occupancy_ratio": float(gfap_occupancy_ratio),
+                "territory_expansion_um": float(territory_expansion_um),
+                "n_branches": int(n_branches),
+                "n_junctions": int(n_junctions),
+                "avg_branch_length_um": float(avg_branch_length),
+                "mean_tortuosity": float(mean_tortuosity),
+                "max_tortuosity": float(max_tortuosity),
+                "skeleton_method": "skan_gfap_territorial_2d",
+                "projection_method": proj_method
+            }
+            
+            all_metrics.append(metrics_row)
+            
+            # Guardar datos SKAN individuales
+            summary_stats.to_csv(skel_dir / f"skan_summary_{label}.csv", index=False)
+            
+            # 10. Guardar imágenes territoriales para debugging/visualización
+            tifffile.imwrite(skel_dir / f"nuclear_mask_{label}.tif", nuclear_mask.astype(np.uint8))
+            tifffile.imwrite(skel_dir / f"territorial_mask_{label}.tif", territorial_mask.astype(np.uint8))
+            tifffile.imwrite(skel_dir / f"gfap_binary_{label}.tif", gfap_binary.astype(np.uint8))
+            tifffile.imwrite(skel_dir / f"skeleton_{label}.tif", skeleton_binary.astype(np.uint8))
+            
+            print(f"  Astrocito {label}: {total_length_um:.1f}µm GFAP, {n_branches} ramas, territorio {territorial_area_um2:.1f}µm², GFAP+ {gfap_positive_area_um2:.1f}µm²")
+            
+        except Exception as e:
+            print(f"  Error procesando astrocito {label}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Guardar esqueleto combinado 2D
+    out_skel_2d = out_dir / "05_skeleton_labels_2d.tif"
+    tifffile.imwrite(out_skel_2d, combined_skeleton_2d)
+    
+    # Guardar métricas
+    df_metrics = pd.DataFrame(all_metrics)
+    if not df_metrics.empty:
+        df_metrics.to_csv(skel_dir / "skan_native_2d_summary.csv", index=False)
+        print(f"Esqueletización 2D completada. {len(all_metrics)} astrocitos procesados.")
+    else:
+        print("No se generaron métricas de esqueletización.")
+    
+    return df_metrics
+
+
+def run_unified_2d_skeleton_and_sholl(
+    img_path: Path,
+    mask_path: Path,
+    out_dir: Path,
+    cal: dict
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Pipeline 2D unificado: esqueletización + Sholl en un solo paso.
+    Reemplaza run_advanced_skeleton_and_save() + run_sholl_and_save().
+    
+    Returns:
+        (skeleton_metrics_df, sholl_df)
+    """
+    from .pipeline_2d_unified import run_unified_2d_skeleton_and_sholl as _run_unified
+    
+    # Cargar datos 3D
+    gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
+    arr, axes = load_image_any(img_path)
+    vol = reorder_to_zcyx(arr, axes)
+    gfap_3d = vol[:, gfap_idx, :, :].astype(np.float32)
+    mask_3d = tifffile.imread(mask_path)
+    
+    if mask_3d.shape != gfap_3d.shape:
+        raise RuntimeError(f"Dimensiones incompatibles: mask {mask_3d.shape} vs gfap {gfap_3d.shape}")
+    
+    # Ejecutar pipeline unificado
+    return _run_unified(mask_3d, gfap_3d, cal, out_dir)
+
+
 def run_advanced_skeleton_and_save(
     img_path: Path,
     mask_path: Path,
@@ -602,9 +927,16 @@ def run_advanced_skeleton_and_save(
     conflict_resolve: bool = True
 ) -> pd.DataFrame:
     """
-    Lógica completa de esqueletización (de 04_...) y análisis con Skan.
-    (Ejecución PARALELIZADA)
+    DEPRECATED: Usar run_unified_2d_skeleton_and_sholl() en su lugar.
+    
+    Esta función se mantiene temporalmente por compatibilidad,
+    pero ahora redirige al pipeline 2D unificado.
     """
+    print("⚠️  run_advanced_skeleton_and_save() está deprecated")
+    print("   Redirigiendo a pipeline 2D unificado...")
+    
+    df_skeleton, _ = run_unified_2d_skeleton_and_sholl(img_path, mask_path, out_dir, cal)
+    return df_skeleton
     
     z_um, y_um, x_um = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
     gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
@@ -663,6 +995,26 @@ def run_advanced_skeleton_and_save(
 
     out_skel_labels = out_dir / "05_skeleton_labels.tif"
     tifffile.imwrite(out_skel_labels, combined_labels.astype(np.uint16))
+    
+    # Generar proyecciones 2D si está habilitado
+    proj_2d_enable = bool(cal.get("PROJECTION_2D_ENABLE", True))
+    if proj_2d_enable:
+        proj_method = str(cal.get("PROJECTION_2D_METHOD", "max")).lower()
+        
+        # Proyectar esqueleto 3D a 2D
+        skel_2d = project_mask_labels_2d(combined_labels, method=proj_method)
+        out_skel_2d = out_dir / "05_skeleton_labels_2d.tif"
+        tifffile.imwrite(out_skel_2d, skel_2d.astype(np.uint16))
+        
+        # También proyectar las máscaras originales
+        mask_2d = project_mask_labels_2d(mask, method=proj_method)
+        out_mask_2d = out_dir / "04_final_astrocytes_mask_2d.tif"
+        tifffile.imwrite(out_mask_2d, mask_2d.astype(np.uint16))
+        
+        # Proyectar GFAP también para referencia
+        gfap_2d = project_3d_to_2d(gfap, method=proj_method)
+        out_gfap_2d = out_dir / "gfap_projection_2d.tif"
+        tifffile.imwrite(out_gfap_2d, gfap_2d.astype(np.float32))
 
     df = pd.DataFrame(metrics)
     df.to_csv(skel_dir / "summary.csv", index=False)
@@ -741,6 +1093,227 @@ def _process_sholl_label(lab, centroids, skel_points, spacing, radii, save_rings
     return (results_list, rings_data)
 
 
+def run_sholl_2d_native_skan_simple(
+    skeleton_labels: np.ndarray,
+    cal: dict,
+    out_dir: Path
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Análisis de Sholl usando SKAN nativo sobre esqueletos 2D."""
+    import skan
+    
+    y_um = float(cal.get('y', 0.3))
+    x_um = float(cal.get('x', 0.3))
+    spacing = (y_um, x_um)
+    
+    min_radius_um = float(cal.get('SHOLL_MIN_RADIUS_UM', 5.0))
+    max_radius_um = float(cal.get('SHOLL_MAX_RADIUS_UM', 100.0))
+    step_um = float(cal.get('SHOLL_STEP_UM', 2.0))
+    
+    radii_um = np.arange(min_radius_um, max_radius_um + step_um, step_um)
+    
+    labels = np.unique(skeleton_labels)
+    labels = labels[labels > 0]
+    
+    all_results = []
+    summary_results = []
+    rings_data = {}
+    
+    for label in labels:
+        try:
+            # Crear máscara binaria del esqueleto
+            skel_binary = (skeleton_labels == label).astype(bool)
+            
+            if not np.any(skel_binary):
+                continue
+            
+            # Crear objeto SKAN
+            skeleton_obj = skan.Skeleton(skel_binary, spacing=spacing)
+            
+            # Obtener centroide del esqueleto
+            coords = skeleton_obj.coordinates
+            if len(coords) == 0:
+                continue
+                
+            # Usar centroide de masa de las coordenadas del esqueleto
+            centroid_voxels = np.mean(coords, axis=0)  # (y, x) en voxeles
+            centroid_um = centroid_voxels * np.array([y_um, x_um])  # (y, x) en µm
+            
+            # Realizar análisis de Sholl nativo con SKAN
+            # Nota: centroid debe ser en coordenadas físicas (µm)
+            sholl_results = skan.sholl_analysis(skeleton_obj, centroid_um, radii_um)
+            
+            # Extraer datos para cada radio
+            for i, radius in enumerate(radii_um):
+                intersections = sholl_results[i] if i < len(sholl_results) else 0
+                
+                all_results.append({
+                    'label': int(label),
+                    'radius_um': float(radius),
+                    'intersections': int(intersections),
+                    'method': 'skan_native'
+                })
+            
+            # Calcular métricas resumen
+            total_intersections = np.sum(sholl_results)
+            if total_intersections > 0:
+                # AUC usando integración trapezoidal
+                auc = np.trapz(sholl_results, radii_um)
+                
+                # Radio crítico (primer radio con intersecciones)
+                nonzero_indices = np.where(sholl_results > 0)[0]
+                critical_radius = radii_um[nonzero_indices[0]] if len(nonzero_indices) > 0 else 0.0
+                
+                # Pico de intersecciones
+                peak_intersections = np.max(sholl_results)
+                peak_radius = radii_um[np.argmax(sholl_results)]
+            else:
+                auc = critical_radius = peak_intersections = peak_radius = 0.0
+            
+            summary_results.append({
+                'label': int(label),
+                'auc': float(auc),
+                'critical_radius_um': float(critical_radius),
+                'peak_intersections': int(peak_intersections),
+                'peak_radius_um': float(peak_radius),
+                'total_intersections': int(total_intersections),
+                'method': 'skan_native'
+            })
+            
+            # Guardar anillos para visualización (agregar Z=0 para compatibilidad)
+            rings_data[str(label)] = {
+                'centroid_um': [0.0, float(centroid_um[0]), float(centroid_um[1])],  # Z,Y,X
+                'radii_um': radii_um.tolist()
+            }
+            
+        except Exception as e:
+            print(f"Error procesando Sholl para label {label}: {e}")
+            continue
+    
+    # Crear DataFrames
+    df_sholl = pd.DataFrame(all_results)
+    df_summary = pd.DataFrame(summary_results)
+    
+    # Guardar resultados
+    if not df_sholl.empty:
+        df_sholl.to_csv(out_dir / "sholl_2d_native.csv", index=False)
+    if not df_summary.empty:
+        df_summary.to_csv(out_dir / "sholl_summary_2d_native.csv", index=False)
+    
+    # Guardar anillos
+    if rings_data:
+        rings_path = out_dir / "sholl_rings_2d_native.json"
+        with open(rings_path, 'w') as f:
+            import json
+            json.dump(rings_data, f, indent=2)
+    
+    print(f"Análisis Sholl SKAN nativo completado. {len(labels)} astrocitos procesados.")
+    return df_sholl, df_summary
+
+
+def run_sholl_native_skan(
+    skeleton_labels: np.ndarray,
+    mask_labels: np.ndarray,
+    cal: dict,
+    out_dir: Path,
+    is_2d: bool = False
+) -> pd.DataFrame:
+    """
+    Análisis de Sholl usando skan.sholl_analysis nativo.
+    Trabaja tanto con datos 2D como 3D.
+    """
+    if sk_summarize is None or Skeleton is None:
+        print("Advertencia: skan no está disponible, usando método manual.")
+        return run_sholl_manual(skeleton_labels, mask_labels, cal, out_dir, is_2d)
+    
+    min_r = float(cal.get("SHOLL_MIN_RADIUS_UM", 5.0))
+    max_r = float(cal.get("SHOLL_MAX_RADIUS_UM", 100.0))
+    step_r = float(cal.get("SHOLL_STEP_UM", 2.0))
+    
+    # Configurar spacing según dimensionalidad
+    if is_2d:
+        y_um, x_um = float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        spacing = (y_um, x_um)
+    else:
+        z_um, y_um, x_um = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        spacing = (z_um, y_um, x_um)
+    
+    # Generar radios para Sholl
+    radii = np.arange(min_r, max_r + step_r, step_r)
+    
+    results = []
+    labels = np.unique(mask_labels)
+    labels = labels[labels > 0]
+    
+    print(f"Ejecutando Sholl {'2D' if is_2d else '3D'} nativo de SKAN para {len(labels)} astrocitos...")
+    
+    for lab in labels:
+        try:
+            # Obtener esqueleto de esta etiqueta
+            skel_mask = (skeleton_labels == lab).astype(np.uint8)
+            if not np.any(skel_mask):
+                continue
+            
+            # Obtener centro desde la máscara (centroide del núcleo)
+            mask_this = (mask_labels == lab)
+            if not np.any(mask_this):
+                continue
+                
+            # Calcular centroide de la máscara
+            coords = np.nonzero(mask_this)
+            if is_2d:
+                center = (np.mean(coords[0]) * spacing[0], np.mean(coords[1]) * spacing[1])
+            else:
+                center = (np.mean(coords[0]) * spacing[0], 
+                         np.mean(coords[1]) * spacing[1], 
+                         np.mean(coords[2]) * spacing[2])
+            
+            # Crear objeto Skeleton de skan
+            skel_obj = Skeleton(skel_mask, spacing=spacing)
+            
+            # Ejecutar análisis de Sholl nativo
+            center_result, shell_radii, intersections = skan.sholl_analysis(
+                skel_obj, 
+                center=center,
+                shells=radii
+            )
+            
+            # Calcular métricas adicionales
+            if len(intersections) > 0:
+                peak_idx = np.argmax(intersections)
+                critical_radius_um = float(shell_radii[peak_idx])
+                peak_intersections = float(intersections[peak_idx])
+                total_intersections = float(np.sum(intersections))
+                
+                # Calcular AUC (área bajo la curva)
+                from scipy.integrate import trapezoid
+                auc = float(trapezoid(intersections, shell_radii))
+                
+                results.append({
+                    'label': int(lab),
+                    'critical_radius_um': critical_radius_um,
+                    'peak_intersections': peak_intersections,
+                    'total_intersections': total_intersections,
+                    'auc': auc,
+                    'center_y_um': float(center_result[0] if is_2d else center_result[1]),
+                    'center_x_um': float(center_result[1] if is_2d else center_result[2]),
+                    'center_z_um': 0.0 if is_2d else float(center_result[0]),
+                    'is_2d': is_2d
+                })
+                
+        except Exception as e:
+            print(f"Error en Sholl SKAN para label {lab}: {e}")
+            continue
+    
+    if results:
+        df = pd.DataFrame(results)
+        suffix = "_2d" if is_2d else ""
+        df.to_csv(out_dir / f"sholl{suffix}.csv", index=False)
+        print(f"Sholl {'2D' if is_2d else '3D'} completado: {len(results)} astrocitos analizados")
+        return df
+    else:
+        print("No se pudieron analizar astrocitos con Sholl SKAN")
+        return pd.DataFrame()
+
 def run_sholl_and_save(
     out_dir: Path,
     cal: dict,
@@ -748,78 +1321,108 @@ def run_sholl_and_save(
     save_rings_json: bool = True
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Ejecuta el análisis de Sholl y guarda los resultados.
-    (Ejecución PARALELIZADA)
+    DEPRECATED: El análisis de Sholl ahora se ejecuta automáticamente
+    junto con la esqueletización en run_unified_2d_skeleton_and_sholl().
+    
+    Esta función se mantiene por compatibilidad pero ya no hace nada.
+    Los resultados se encuentran en: sholl_2d_native.csv
     """
+    print("⚠️  run_sholl_and_save() está deprecated")
+    print("   El análisis de Sholl se ejecuta automáticamente con la esqueletización")
     
-    min_r = float(cal.get("SHOLL_MIN_RADIUS_UM", 0.0))
-    max_r = float(cal.get("SHOLL_MAX_RADIUS_UM", 50.0))
-    step_r = float(cal.get("SHOLL_STEP_UM", 20.0))
-    if step_r <= 0:
-        raise ValueError("El paso de Sholl (SHOLL_STEP_UM) debe ser positivo.")
-
-    z_um, y_um, x_um = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
-    spacing = (z_um, y_um, x_um)
-
-    skeleton_path = out_dir / "05_skeleton_labels.tif"
-    mask_path = out_dir / "04_final_astrocytes_mask.tif" if restrict_to_final else (out_dir / "02_cellpose_mask.tif")
+    # Cargar resultados existentes si están disponibles
+    sholl_path = out_dir / "sholl_2d_native.csv"
+    if sholl_path.exists():
+        df_sholl = pd.read_csv(sholl_path)
+        return pd.DataFrame(), df_sholl  # Retornar vacío 3D, lleno 2D
     
-    if not skeleton_path.exists() or not mask_path.exists():
-        print(f"Advertencia: Faltan archivos para Sholl (Skeleton o Mask) en {out_dir}")
-        return pd.DataFrame(), pd.DataFrame()
+    return pd.DataFrame(), pd.DataFrame()
 
-    skel_labels = tifffile.imread(skeleton_path)
-    mask_labels = tifffile.imread(mask_path)
+def run_sholl_manual(
+    skeleton_labels: np.ndarray,
+    mask_labels: np.ndarray, 
+    cal: dict,
+    out_dir: Path,
+    is_2d: bool = False
+) -> pd.DataFrame:
+    """
+    Análisis de Sholl manual (respaldo cuando SKAN no está disponible).
+    """
+    min_r = float(cal.get("SHOLL_MIN_RADIUS_UM", 5.0))
+    max_r = float(cal.get("SHOLL_MAX_RADIUS_UM", 100.0))
+    step_r = float(cal.get("SHOLL_STEP_UM", 2.0))
     
+    # Configurar spacing según dimensionalidad
+    if is_2d:
+        y_um, x_um = float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        spacing = np.array([y_um, x_um])
+    else:
+        z_um, y_um, x_um = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        spacing = np.array([z_um, y_um, x_um])
+    
+    radii = np.arange(min_r, max_r + step_r, step_r)
     labels = np.unique(mask_labels)
     labels = labels[labels > 0]
     
-    radii = np.arange(min_r, max_r + step_r, step_r)
-    all_results_rows = []
-    all_rings_data = {}
-
-    props = regionprops(mask_labels)
-    centroids = {p.label: p.centroid for p in props}
-
-    skel_points = {}
+    results = []
+    
     for lab in labels:
-        if lab not in centroids: continue
-        points = np.argwhere(skel_labels == lab)
-        if points.shape[0] > 0:
-            skel_points[lab] = points
-
-    labels_to_process = [lab for lab in labels if lab in skel_points]
-    if not labels_to_process:
-        print(f"No se encontraron puntos de esqueleto para las etiquetas en {out_dir}")
-        return pd.DataFrame(), pd.DataFrame()
-
-    task_func = partial(
-        _process_sholl_label,
-        centroids=centroids,
-        skel_points=skel_points,
-        spacing=spacing,
-        radii=radii,
-        save_rings_json=save_rings_json
-    )
+        try:
+            # Obtener centroide de la máscara
+            mask_this = (mask_labels == lab)
+            if not np.any(mask_this):
+                continue
+                
+            coords = np.nonzero(mask_this)
+            if is_2d:
+                centroid = np.array([np.mean(coords[0]), np.mean(coords[1])])
+            else:
+                centroid = np.array([np.mean(coords[0]), np.mean(coords[1]), np.mean(coords[2])])
+            
+            # Obtener puntos del esqueleto
+            skel_points = np.argwhere(skeleton_labels == lab)
+            if len(skel_points) == 0:
+                continue
+            
+            # Convertir a coordenadas físicas
+            centroid_um = centroid * spacing
+            points_um = skel_points.astype(np.float32) * spacing
+            
+            # Calcular distancias desde el centroide
+            distances = np.sqrt(np.sum((points_um - centroid_um)**2, axis=1))
+            
+            # Contar intersecciones por anillo
+            intersections, _ = np.histogram(distances, bins=np.append(radii - step_r/2, radii[-1] + step_r/2))
+            
+            if len(intersections) > 0 and np.max(intersections) > 0:
+                peak_idx = np.argmax(intersections)
+                critical_radius_um = float(radii[peak_idx])
+                peak_intersections = float(intersections[peak_idx])
+                total_intersections = float(np.sum(intersections))
+                
+                # Calcular AUC usando método trapezoidal
+                auc = float(np.trapz(intersections, radii))
+                
+                results.append({
+                    'label': int(lab),
+                    'critical_radius_um': critical_radius_um,
+                    'peak_intersections': peak_intersections,
+                    'total_intersections': total_intersections,
+                    'auc': auc,
+                    'center_y_um': float(centroid_um[0] if is_2d else centroid_um[1]),
+                    'center_x_um': float(centroid_um[1] if is_2d else centroid_um[2]),
+                    'center_z_um': 0.0 if is_2d else float(centroid_um[0]),
+                    'is_2d': is_2d
+                })
+                
+        except Exception as e:
+            print(f"Error en Sholl manual para label {lab}: {e}")
+            continue
     
-    with ProcessPoolExecutor() as executor:
-        results = list(executor.map(task_func, labels_to_process))
-
-    for (results_list, rings_data) in results:
-        all_results_rows.extend(results_list)
-        if rings_data:
-            all_rings_data.update(rings_data)
-
-    df_sholl = pd.DataFrame(all_results_rows)
-    
-    df_summary = pd.DataFrame()
-    if not df_sholl.empty:
-        df_summary = df_sholl.sholl.get_scalar_metrics()
-
-    # Guardar resultados
-    df_sholl.to_csv(out_dir / "sholl.csv", index=False)
-    df_summary.to_csv(out_dir / "sholl_summary.csv", index=False)
-    if save_rings_json:
-        (out_dir / "sholl_rings.json").write_text(json.dumps(all_rings_data, indent=2))
-        
-    return df_sholl, df_summary
+    if results:
+        df = pd.DataFrame(results)
+        suffix = "_2d" if is_2d else ""
+        df.to_csv(out_dir / f"sholl{suffix}.csv", index=False)
+        return df
+    else:
+        return pd.DataFrame()

@@ -13,7 +13,7 @@ import subprocess # <--- CORRECCIÓN
 import sys # <--- CORRECCIÓN
 import os # <--- CORRECCIÓN
 
-st.title("Resumen por imagen (detalle)")
+st.title("Análisis por Preparado")
 render_sidebar(show_calibration=True)
 
 root = Path(__file__).resolve().parents[2]
@@ -65,10 +65,10 @@ st.markdown("### Resumen de Conteo del Pipeline")
 p_cp = out_dir / "02_cellpose_mask.tif"
 p_nuc_metrics = out_dir / "03_nucleus_metrics.csv"
 p_final = out_dir / "04_final_astrocytes_mask.tif"
-p_skel_sum = out_dir / "skeletons" / "summary.csv"
+p_sholl_2d = out_dir / "sholl_2d_native.csv"
 p_sholl_sum = out_dir / "sholl_summary.csv"
 
-n_cellpose, n_gfap, n_final, n_skel = 0, 0, 0, 0
+n_cellpose, n_gfap, n_final, n_sholl = 0, 0, 0, 0
 if p_nuc_metrics.exists():
     try:
         df_nuc_temp = pd.read_csv(p_nuc_metrics)
@@ -83,15 +83,15 @@ if p_final.exists():
     try: n_final = int((np.unique(tifffile.imread(p_final)) > 0).sum())
     except Exception: pass
     
-if p_skel_sum.exists():
-    try: n_skel = pd.read_csv(p_skel_sum).shape[0]
+if p_sholl_2d.exists():
+    try: n_sholl = pd.read_csv(p_sholl_2d)["label"].nunique()
     except Exception: pass
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Núcleos (02)", n_cellpose)
 c2.metric("Candidatos (03)", n_gfap)
 c3.metric("Final (04)", n_final)
-c4.metric("Esqueletos (05)", n_skel)
+c4.metric("Con Sholl (04)", n_sholl)
 
 # --- 3. Métricas de Núcleo (Paso 03) ---
 if p_nuc_metrics.exists():
@@ -117,48 +117,11 @@ if p_nuc_metrics.exists():
     except Exception as e:
         st.error(f"No se pudo leer 03_nucleus_metrics.csv: {e}")
 
-# --- 4. Métricas de Esqueleto (Paso 04) ---
-if p_skel_sum.exists():
-    st.markdown("### Métricas de Esqueleto (de `skeletons/summary.csv`)")
-    try:
-        dfs = pd.read_csv(p_skel_sum)
-        
-        med_len = float(dfs["total_length_um"].median()) if "total_length_um" in dfs.columns and dfs["total_length_um"].notna().any() else 0.0
-        med_branch = float(dfs["n_branches"].median()) if "n_branches" in dfs.columns and dfs["n_branches"].notna().any() else 0.0
-        med_tort = float(dfs["mean_tortuosity"].median()) if "mean_tortuosity" in dfs.columns and dfs["mean_tortuosity"].notna().any() else 0.0
-        med_dom = float(dfs["domain_volume_um3"].median()) if "domain_volume_um3" in dfs.columns and dfs["domain_volume_um3"].notna().any() else 0.0
-        med_tube_int = float(dfs["tube_mean_intensity"].median()) if "tube_mean_intensity" in dfs.columns and dfs["tube_mean_intensity"].notna().any() else 0.0
-
-        d1,d2,d3,d4,d5 = st.columns(5)
-        d1.metric("Longitud (µm)", f"{med_len:.1f}")
-        d2.metric("# Ramas", f"{med_branch:.1f}")
-        d3.metric("Tortuosidad", f"{med_tort:.2f}")
-        d4.metric("Vol. Dominio (µm³)", f"{med_dom:.0f}")
-        d5.metric("Int. Tubo (media)", f"{med_tube_int:.1f}")
-        
-        st.dataframe(dfs.round(3), use_container_width=True)
-
-        charts_skel = []
-        if "total_length_um" in dfs.columns:
-            charts_skel.append(alt.Chart(dfs).mark_bar().encode(x=alt.X('total_length_um:Q', bin=alt.Bin(maxbins=30), title='Longitud (µm)'), y='count()').properties(height=200))
-        if "n_branches" in dfs.columns:
-            charts_skel.append(alt.Chart(dfs).mark_bar().encode(x=alt.X('n_branches:Q', bin=alt.Bin(maxbins=20), title='# Ramas'), y='count()').properties(height=200))
-        if "mean_tortuosity" in dfs.columns:
-            charts_skel.append(alt.Chart(dfs).mark_bar().encode(x=alt.X('mean_tortuosity:Q', bin=alt.Bin(maxbins=30), title='Tortuosidad Media'), y='count()').properties(height=200))
-        if "domain_volume_um3" in dfs.columns:
-            charts_skel.append(alt.Chart(dfs).mark_bar().encode(x=alt.X('domain_volume_um3:Q', bin=alt.Bin(maxbins=30), title='Vol. Dominio (µm³)'), y='count()').properties(height=200))
-        
-        if charts_skel:
-            st.altair_chart(alt.vconcat(*charts_skel).resolve_scale(x='independent'), use_container_width=True)
-    except Exception as e:
-        st.error(f"No se pudo leer summary.csv: {e}")
-
-# --- 5. Métricas de Sholl (Paso 05) ---
+# --- 4. Métricas de Sholl (Paso 04) ---
 if p_sholl_sum.exists():
-    st.markdown("### Métricas de Sholl (de `sholl_summary.csv` y `sholl.csv`)")
+    st.markdown("### Métricas de Sholl 2D Nativo (de `sholl_summary.csv`)")
     try:
         df_sholl_sum = pd.read_csv(p_sholl_sum)
-        df_sholl_curves = pd.read_csv(out_dir / "sholl.csv")
         
         s1, s2, s3 = st.columns(3)
         s1.metric("AUC Mediana", f"{df_sholl_sum['auc'].median():.1f}")
@@ -167,35 +130,71 @@ if p_sholl_sum.exists():
         
         st.dataframe(df_sholl_sum.round(3), use_container_width=True)
 
-        st.altair_chart(alt.Chart(df_sholl_curves).mark_line().encode(
-            x='radius_um:Q', 
-            y='intersections:Q', 
-            color='label:N'
-        ).properties(height=260).interactive(), use_container_width=True)
+        # Perfiles de Sholl por célula
+        if p_sholl_2d.exists():
+            df_sholl_curves = pd.read_csv(p_sholl_2d)
+            st.altair_chart(alt.Chart(df_sholl_curves).mark_line().encode(
+                x=alt.X('radius_um:Q', title='Radio (µm)'), 
+                y=alt.Y('intersections:Q', title='Intersecciones'), 
+                color='label:N'
+            ).properties(height=260, title="Perfiles de Sholl por Célula").interactive(), use_container_width=True)
 
     except Exception as e:
-        st.error(f"No se pudo leer sholl.csv o sholl_summary.csv: {e}")
+        st.error(f"No se pudo leer sholl_2d_native.csv: {e}")
 
 # --- 6. Visualización 3D ---
 st.markdown("---")
-st.markdown("### Ver preparado en 3D (Napari)")
-open_napari = st.button("👁️ Abrir con máscaras finales, esqueletos y anillos de Sholl")
-if open_napari:
+st.markdown("### Ver preparado completo en Napari")
+
+# Botones separados para visualización 3D y 2D
+col_view_1, col_view_2 = st.columns(2)
+with col_view_1:
+    open_napari_3d = st.button("👁️ Visualización 3D completa", use_container_width=True, help="Máscaras 3D en Napari")
+with col_view_2:
+    open_napari_2d = st.button("📊 Visualización 2D completa", use_container_width=True, help="Proyección 2D + esqueletos + anillos Sholl")
+    
+# Visualizador 3D completo
+if open_napari_3d:
     try:
         cal = _read_global_calibration()
         z, y, x = float(cal.get('z', 1.0)), float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        dapi_idx = int(cal.get("DAPI_CHANNEL_INDEX", 0))
+        gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
         cmd = [sys.executable, str(napari_script), 
-               "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x)]
+               "--path", str(img_path), "--z", str(z), "--y", str(y), "--x", str(x),
+               "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
         
-        for pth, flag in [
-            (p_final, "--final"),
-            (out_dir / "05_skeleton_labels.tif", "--skeleton"),
-            (out_dir / "sholl_rings.json", "--rings"),
-        ]:
-            if pth.exists():
-                cmd += [flag, str(pth)]
+        # Máscaras 3D
+        if p_final.exists():
+            cmd += ["--final", str(p_final)]
         
         subprocess.Popen(cmd, env=os.environ.copy())
-        st.info("Napari lanzado en una ventana separada.")
+        st.info("Visualizador 3D de Napari lanzado.")
     except Exception as e:
-        st.error(f"No se pudo lanzar Napari: {e}")
+        st.error(f"No se pudo lanzar Napari 3D: {e}")
+
+# Visualizador 2D completo  
+if open_napari_2d:
+    try:
+        cal = _read_global_calibration()
+        y, x = float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
+        dapi_idx = int(cal.get("DAPI_CHANNEL_INDEX", 0))
+        gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
+        napari_2d_script = root / "streamlit" / "napari_viewer_2d.py"
+        cmd = [sys.executable, str(napari_2d_script), 
+               "--path", str(img_path), "--y", str(y), "--x", str(x),
+               "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
+        
+        # Archivos 2D
+        skel_2d = out_dir / "05_skeleton_labels_2d.tif"
+        rings = out_dir / "sholl_rings_2d_native.json"
+        
+        if skel_2d.exists():
+            cmd += ["--skeleton_2d", str(skel_2d)]
+        if rings.exists():
+            cmd += ["--rings", str(rings)]
+        
+        subprocess.Popen(cmd, env=os.environ.copy())
+        st.info("Visualizador 2D de Napari lanzado.")
+    except Exception as e:
+        st.error(f"No se pudo lanzar Napari 2D: {e}")
