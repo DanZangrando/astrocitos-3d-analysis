@@ -62,11 +62,16 @@ def open_napari_2d(
     
     # Crear proyección máxima de la imagen original para contexto
     if image.ndim == 4:  # (Z, C, Y, X)
-        # Extraer solo los canales DAPI y GFAP
-        dapi_channel = image[:, dapi_idx:dapi_idx+1, :, :]
-        gfap_channel = image[:, gfap_idx:gfap_idx+1, :, :]
-        image_filtered = np.concatenate([dapi_channel, gfap_channel], axis=0)
-        image_proj = np.max(image_filtered, axis=0)  # (C, Y, X)
+        # Extraer solo los canales DAPI y GFAP y proyectar en Z
+        dapi_channel = image[:, dapi_idx, :, :]  # (Z, Y, X)
+        gfap_channel = image[:, gfap_idx, :, :]  # (Z, Y, X)
+        
+        # Proyección máxima en Z para cada canal
+        dapi_proj = np.max(dapi_channel, axis=0)  # (Y, X)
+        gfap_proj = np.max(gfap_channel, axis=0)  # (Y, X)
+        
+        # Combinar en (C, Y, X) manteniendo canales separados
+        image_proj = np.stack([dapi_proj, gfap_proj], axis=0)  # (2, Y, X)
     else:
         image_proj = image
     

@@ -280,12 +280,12 @@ def render_metrics_section():
     ).properties(height=200)
     st.altair_chart(chart_vol, use_container_width=True)
     
-    chart_sph = alt.Chart(df_metrics.dropna(subset=['nucleus_sphericity'])).mark_bar().encode(
-        x=alt.X("nucleus_sphericity:Q", bin=alt.Bin(maxbins=40), title="Esfericidad del Núcleo (0-1)"),
+    chart_circ = alt.Chart(df_metrics.dropna(subset=['nucleus_sphericity'])).mark_bar().encode(
+        x=alt.X("nucleus_sphericity:Q", bin=alt.Bin(maxbins=40), title="Circularidad Nuclear 2D (0-1)"),
         y=alt.Y("count()", title="Conteo"),
         color=alt.Color("is_astrocyte_candidate:N", title="Candidato a Astrocito")
     ).properties(height=200)
-    st.altair_chart(chart_sph, use_container_width=True)
+    st.altair_chart(chart_circ, use_container_width=True)
     
     st.markdown("#### Espacio de Características del Filtrado")
     scatter_filt = alt.Chart(df_metrics).mark_circle(opacity=0.7).encode(

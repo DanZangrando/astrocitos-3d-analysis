@@ -61,22 +61,45 @@ def run_pipeline_for(
             "01": "01_otsu_mask.tif",
             "02": "02_cellpose_mask.tif",
             "03": "03_gfap_filtered_mask.tif",
+            "03_metrics": "03_nucleus_metrics.csv",
             "04": "04_final_astrocytes_mask.tif",
             "skeleton_2d": "05_skeleton_labels_2d.tif",
-            "sholl_csv": "sholl_2d_native.csv",
-            "summary_csv": "skeletons/summary.csv"
+            "skeleton_summary": "skeletons/summary.csv",
+            "sholl_curves": "sholl_2d.csv",
+            "sholl_summary": "sholl_summary.csv"
         }
         return out_dir / name_map[step_id]
 
     def need(step: Step) -> bool:
         order = {"01":1, "02":2, "03":3, "04":4}
-        # Si no existe, siempre se necesita
+        
+        # Para paso 03: verificar tanto la máscara como las métricas
+        if step == "03":
+            mask_exists = get_path("03").exists()
+            metrics_exists = get_path("03_metrics").exists()
+            if not mask_exists or not metrics_exists:
+                return order[step] >= order[start_step]
+            if overwrite_from_step:
+                return order[step] >= order[start_step]
+            return False
+        
+        # Para paso 04: verificar máscara, skeleton summary Y sholl summary
+        if step == "04":
+            mask_exists = get_path("04").exists()
+            skeleton_exists = get_path("skeleton_summary").exists()
+            sholl_exists = get_path("sholl_summary").exists()
+            
+            if not mask_exists or not skeleton_exists or not sholl_exists:
+                return order[step] >= order[start_step]
+            if overwrite_from_step:
+                return order[step] >= order[start_step]
+            return False
+        
+        # Para otros pasos: comportamiento original
         if not get_path(step).exists():
             return order[step] >= order[start_step]
-        # Si existe y pedimos sobrescribir
         if overwrite_from_step:
             return order[step] >= order[start_step]
-        # Si existe y no sobrescribimos
         return False
 
     # --- Cargar Imagen y Canales ---
@@ -147,11 +170,13 @@ def run_pipeline_for(
     return {
         "otsu": get_path("01").exists(),
         "cellpose": get_path("02").exists(),
-        "gfap": get_path("03").exists(),
-        "final": get_path("04").exists(),
+        "gfap_filtered": get_path("03").exists(),
+        "nucleus_metrics": get_path("03_metrics").exists(),
+        "final_mask": get_path("04").exists(),
         "skeleton_2d": get_path("skeleton_2d").exists(),
-        "summary": (out_dir / "skeletons" / "summary.csv").exists(),
-        "sholl": (out_dir / "sholl_2d_native.csv").exists(),
+        "skeleton_summary": get_path("skeleton_summary").exists(),
+        "sholl_curves": get_path("sholl_curves").exists(),
+        "sholl_summary": get_path("sholl_summary").exists(),
     }
 
 

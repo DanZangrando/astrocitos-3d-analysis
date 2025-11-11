@@ -128,6 +128,81 @@ def create_circular_mask_from_nucleus(
     return circular_mask
 
 
+def filter_skeleton_by_nucleus_connectivity(
+    skeleton: np.ndarray,
+    nuclear_mask: np.ndarray
+) -> np.ndarray:
+    """
+    Filtra el esqueleto para quedarse SOLO con la componente conectada que toca el núcleo.
+    
+    Esto elimina fragmentos aislados dentro del territorio que no están conectados
+    al soma del astrocito, incluso después del intento de conexión de fragmentos.
+    
+    Args:
+        skeleton: Esqueleto binario (puede tener múltiples componentes)
+        nuclear_mask: Máscara del núcleo
+        
+    Returns:
+        Esqueleto filtrado con solo la componente conectada al núcleo
+    """
+    if not np.any(skeleton):
+        return skeleton
+    
+    # Etiquetar componentes conectadas del esqueleto
+    labeled_skeleton, n_components = cc_label(skeleton, return_num=True, connectivity=2)
+    
+    if n_components == 1:
+        # Solo hay una componente, no hay nada que filtrar
+        return skeleton
+    
+    # Encontrar qué componente(s) tocan el núcleo
+    nuclear_overlap = labeled_skeleton * nuclear_mask
+    components_touching_nucleus = np.unique(nuclear_overlap)
+    components_touching_nucleus = components_touching_nucleus[components_touching_nucleus > 0]
+    
+    if len(components_touching_nucleus) == 0:
+        # Ninguna componente toca el núcleo directamente
+        # Buscar la componente más cercana al núcleo
+        nucleus_coords = np.argwhere(nuclear_mask)
+        if len(nucleus_coords) == 0:
+            return skeleton
+        
+        nucleus_centroid = nucleus_coords.mean(axis=0)
+        
+        min_dist = np.inf
+        closest_component = 1
+        
+        for comp_id in range(1, n_components + 1):
+            comp_coords = np.argwhere(labeled_skeleton == comp_id)
+            if len(comp_coords) == 0:
+                continue
+            
+            # Distancia mínima entre esta componente y el centroide nuclear
+            dists = np.linalg.norm(comp_coords - nucleus_centroid, axis=1)
+            min_comp_dist = np.min(dists)
+            
+            if min_comp_dist < min_dist:
+                min_dist = min_comp_dist
+                closest_component = comp_id
+        
+        # Quedarse solo con la componente más cercana
+        filtered_skeleton = (labeled_skeleton == closest_component)
+        
+        n_removed = n_components - 1
+        print(f"      → Removidas {n_removed} componentes desconectadas (no tocaban núcleo)")
+        
+        return filtered_skeleton
+    
+    # Si hay componentes tocando el núcleo, quedarse con la(s) que lo tocan
+    filtered_skeleton = np.isin(labeled_skeleton, components_touching_nucleus)
+    
+    n_removed = n_components - len(components_touching_nucleus)
+    if n_removed > 0:
+        print(f"      → Removidas {n_removed} componentes desconectadas del núcleo")
+    
+    return filtered_skeleton
+
+
 def compute_voronoi_territories_2d(
     mask_2d: np.ndarray,
     exclusion_gap_um: float,
@@ -337,6 +412,15 @@ def run_unified_2d_skeleton_and_sholl(
             
             # 3f. Esqueletización
             skeleton = skeletonize(gfap_binary)
+            
+            # 3g. FILTRAR COMPONENTES DESCONECTADAS DEL NÚCLEO
+            # Esto elimina fragmentos aislados que no están conectados al soma
+            skeleton = filter_skeleton_by_nucleus_connectivity(skeleton, nuclear_mask)
+            
+            if not np.any(skeleton):
+                print(f"  ⚠ Label {label}: esqueleto vacío tras filtrar componentes desconectadas")
+                continue
+            
             skeleton_combined[skeleton] = label
             
             # Métricas básicas
@@ -396,12 +480,44 @@ def run_unified_2d_skeleton_and_sholl(
                 n_endpoints = int(branch_data['branch-type'].value_counts().get(1, 0))
                 n_junctions = int(branch_data['branch-type'].value_counts().get(2, 0))
                 
+                # NUEVAS MÉTRICAS DE TORTUOSIDAD
+                tortuosity = branch_data['branch-distance'] / branch_data['euclidean-distance'].replace(0, np.nan)
+                tortuosity_mean = float(tortuosity.mean()) if not tortuosity.isna().all() else 1.0
+                tortuosity_max = float(tortuosity.max()) if not tortuosity.isna().all() else 1.0
+                tortuosity_std = float(tortuosity.std()) if not tortuosity.isna().all() else 0.0
+                
+                # MÉTRICAS DE COMPLEJIDAD RAMIFICACIONAL
+                ramification_index = float(n_branches / max(n_junctions, 1))
+                termination_index = float(n_endpoints / max(n_junctions, 1)) if n_junctions > 0 else np.nan
+                
+                # DISTRIBUCIÓN DE LONGITUDES
+                branch_length_median = float(branch_data['branch-distance'].median())
+                branch_length_p25 = float(branch_data['branch-distance'].quantile(0.25))
+                branch_length_p75 = float(branch_data['branch-distance'].quantile(0.75))
+                branch_length_std = float(branch_data['branch-distance'].std())
+                branch_length_cv = float(branch_length_std / branch_data['branch-distance'].mean()) if branch_data['branch-distance'].mean() > 0 else 0.0
+                
+                # FRAGMENTACIÓN
+                n_components = int(branch_data['skeleton-id'].nunique())
+                
                 skeleton_metrics[i].update({
                     'n_branches': int(n_branches),
                     'total_branch_length_um': float(total_branch_length),
                     'n_endpoints': int(n_endpoints),
                     'n_junctions': int(n_junctions),
-                    'mean_branch_length_um': float(total_branch_length / n_branches) if n_branches > 0 else 0.0
+                    'mean_branch_length_um': float(total_branch_length / n_branches) if n_branches > 0 else 0.0,
+                    # Nuevas métricas
+                    'tortuosity_mean': tortuosity_mean,
+                    'tortuosity_max': tortuosity_max,
+                    'tortuosity_std': tortuosity_std,
+                    'ramification_index': ramification_index,
+                    'termination_index': termination_index,
+                    'branch_length_median_um': branch_length_median,
+                    'branch_length_p25_um': branch_length_p25,
+                    'branch_length_p75_um': branch_length_p75,
+                    'branch_length_std_um': branch_length_std,
+                    'branch_length_cv': branch_length_cv,
+                    'n_connected_components': n_components
                 })
             else:
                 skeleton_metrics[i].update({
@@ -409,7 +525,18 @@ def run_unified_2d_skeleton_and_sholl(
                     'total_branch_length_um': 0.0,
                     'n_endpoints': 0,
                     'n_junctions': 0,
-                    'mean_branch_length_um': 0.0
+                    'mean_branch_length_um': 0.0,
+                    'tortuosity_mean': 1.0,
+                    'tortuosity_max': 1.0,
+                    'tortuosity_std': 0.0,
+                    'ramification_index': 0.0,
+                    'termination_index': np.nan,
+                    'branch_length_median_um': 0.0,
+                    'branch_length_p25_um': 0.0,
+                    'branch_length_p75_um': 0.0,
+                    'branch_length_std_um': 0.0,
+                    'branch_length_cv': 0.0,
+                    'n_connected_components': 0
                 })
         except Exception as e:
             print(f"  ⚠ SKAN falló para label {label}: {e}")
@@ -418,7 +545,18 @@ def run_unified_2d_skeleton_and_sholl(
                 'total_branch_length_um': 0.0,
                 'n_endpoints': 0,
                 'n_junctions': 0,
-                'mean_branch_length_um': 0.0
+                'mean_branch_length_um': 0.0,
+                'tortuosity_mean': 1.0,
+                'tortuosity_max': 1.0,
+                'tortuosity_std': 0.0,
+                'ramification_index': 0.0,
+                'termination_index': np.nan,
+                'branch_length_median_um': 0.0,
+                'branch_length_p25_um': 0.0,
+                'branch_length_p75_um': 0.0,
+                'branch_length_std_um': 0.0,
+                'branch_length_cv': 0.0,
+                'n_connected_components': 0
             })
     
     df_skeleton = pd.DataFrame(skeleton_metrics)
@@ -475,10 +613,50 @@ def run_unified_2d_skeleton_and_sholl(
     
     df_sholl = pd.DataFrame(sholl_results)
     
-    # Guardar con ambos nombres para compatibilidad
+    # Guardar curvas completas
     df_sholl.to_csv(out_dir / "sholl_2d.csv", index=False)
     df_sholl.to_csv(out_dir / "sholl_2d_native.csv", index=False)
     print(f"  ✓ Resultados Sholl guardados: sholl_2d.csv (+ sholl_2d_native.csv para compatibilidad)")
+    
+    # GENERAR SHOLL_SUMMARY.CSV con métricas escalares (AUC, peak, critical_radius)
+    # Esto es CRÍTICO para la página 06 de comparación entre grupos
+    if not df_sholl.empty:
+        from scipy.integrate import trapezoid
+        
+        summary_records = []
+        for label in df_sholl['label'].unique():
+            label_data = df_sholl[df_sholl['label'] == label].sort_values('radius_um')
+            radii = label_data['radius_um'].to_numpy()
+            intersections = label_data['intersections'].to_numpy()
+            
+            if len(radii) < 2:
+                # Sin suficientes puntos para calcular métricas
+                summary_records.append({
+                    'label': int(label),
+                    'critical_radius_um': np.nan,
+                    'peak_intersections': np.nan,
+                    'auc': np.nan
+                })
+                continue
+            
+            # Calcular métricas escalares
+            peak_idx = np.argmax(intersections)
+            critical_radius_um = radii[peak_idx]
+            peak_intersections = intersections[peak_idx]
+            auc = trapezoid(intersections, radii)
+            
+            summary_records.append({
+                'label': int(label),
+                'critical_radius_um': float(critical_radius_um),
+                'peak_intersections': float(peak_intersections),
+                'auc': float(auc)
+            })
+        
+        df_sholl_summary = pd.DataFrame(summary_records)
+        df_sholl_summary.to_csv(out_dir / "sholl_summary.csv", index=False)
+        print(f"  ✓ Resumen Sholl guardado: sholl_summary.csv (AUC, peak, critical_radius)")
+    else:
+        print(f"  ⚠ No se pudo generar sholl_summary.csv (sin datos Sholl)")
     
     # Guardar configuración de anillos para visualización con draw.sholl_shells()
     # Formato: diccionario {label: {centroid_um, radii_um}} para compatibilidad con visualizador
