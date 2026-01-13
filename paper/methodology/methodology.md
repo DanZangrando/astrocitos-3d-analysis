@@ -2,11 +2,6 @@
 # Methodology
 
 
-### Librerías Principales
-
--   **`numpy`**: Operaciones matriciales para el cálculo de sumas de intensidad y recorte de arrays 4D.
--   **`tifffile`**: Lectura y escritura de imágenes compatible con ImageJ Hyperstacks.
-
 ## 1. Calibración y Visualización de los Preparados
 
 Este paso inicial tiene como objetivo definir la escala física del experimento (resolución en micrones por vóxel) y visualizar los datos crudos para verificar su integridad.
