@@ -110,67 +110,11 @@ c3.metric("⭐ Astrocitos Finales", n_final, help="Tras filtros espaciales (paso
 c4.metric("🌿 Esqueletos", n_skel, help="Con topología analizada (paso 04)")
 c5.metric("🎯 Con Sholl", n_sholl, help="Con análisis de Sholl completo (paso 04)")
 
-# --- 3. Métricas de Núcleo (Paso 03) ---
-st.markdown("---")
-st.markdown("### 🔬 Métricas Nucleares (Paso 03)")
 
-if not p_nuc_metrics.exists():
-    st.info("No se encontró `03_nucleus_metrics.csv`. Ejecutá el paso 03 primero.")
-else:
-    try:
-        df_nuc = pd.read_csv(p_nuc_metrics)
-        
-        # Métricas resumen
-        st.markdown("#### Estadísticas Globales")
-        col_n1, col_n2, col_n3, col_n4 = st.columns(4)
-        col_n1.metric("Volumen Medio", f"{df_nuc['nucleus_volume_um3'].mean():.1f} µm³")
-        col_n2.metric("Circularidad Media (2D)", f"{df_nuc['nucleus_sphericity'].mean():.3f}")
-        col_n3.metric("% Candidatos", f"{100 * n_gfap / max(n_cellpose, 1):.1f}%")
-        col_n4.metric("Total Células", f"{df_nuc.shape[0]}")
-        
-        # Tabla completa con mejor formato
-        st.markdown("#### Tabla Completa de Métricas Nucleares")
-        st.dataframe(
-            df_nuc.round(3),
-            use_container_width=True,
-            height=350,
-            column_config={
-                "label": st.column_config.NumberColumn("ID", format="%d"),
-                "nucleus_volume_um3": st.column_config.NumberColumn("Volumen (µm³)", format="%.1f"),
-                "nucleus_sphericity": st.column_config.NumberColumn("Circularidad 2D", format="%.3f", 
-                                                                     help="4π·área/perímetro² en proyección MIP"),
-                "is_astrocyte_candidate": st.column_config.CheckboxColumn("GFAP+")
-            }
-        )
-        
-        # Gráficos de distribución
-        st.markdown("#### Distribuciones")
-        tab_vol, tab_circ = st.tabs(["📊 Volumen Nuclear", "📊 Circularidad"])
-        
-        with tab_vol:
-            chart_vol = alt.Chart(df_nuc).mark_bar().encode(
-                x=alt.X("nucleus_volume_um3:Q", bin=alt.Bin(maxbins=30), title="Volumen Núcleo (µm³)"),
-                y=alt.Y("count()", title="Frecuencia"),
-                color=alt.Color("is_astrocyte_candidate:N", title="Candidato", 
-                               scale=alt.Scale(domain=[False, True], range=['#d62728', '#2ca02c']))
-            ).properties(height=300, title="Distribución de Volumen Nuclear")
-            st.altair_chart(chart_vol, use_container_width=True)
-        
-        with tab_circ:
-            chart_circ = alt.Chart(df_nuc.dropna(subset=['nucleus_sphericity'])).mark_bar().encode(
-                x=alt.X("nucleus_sphericity:Q", bin=alt.Bin(maxbins=30), title="Circularidad en Proyección 2D (0-1)"),
-                y=alt.Y("count()", title="Frecuencia"),
-                color=alt.Color("is_astrocyte_candidate:N", title="Candidato",
-                               scale=alt.Scale(domain=[False, True], range=['#d62728', '#2ca02c']))
-            ).properties(height=300, title="Distribución de Circularidad Nuclear (2D)")
-            st.altair_chart(chart_circ, use_container_width=True)
-            
-    except Exception as e:
-        st.error(f"Error leyendo métricas nucleares: {e}")
 
 # --- 4. Métricas Topológicas de Esqueleto (Paso 04) ---
 st.markdown("---")
-st.markdown("### 🌿 Métricas Topológicas de Esqueleto (Paso 04)")
+st.markdown("### 🌿 Métricas Topológicas Clave (Paso 04)")
 
 if not p_skel_sum.exists():
     st.info("No se encontró `skeletons/summary.csv`. Ejecutá el paso 04 primero.")
@@ -178,90 +122,50 @@ else:
     try:
         df_skel = pd.read_csv(p_skel_sum)
         
-        # Métricas resumen en tarjetas
         st.markdown("#### Estadísticas Globales")
-        col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
-        col_s1.metric("Longitud Media", f"{df_skel['total_branch_length_um'].mean():.1f} µm")
-        col_s2.metric("Ramas Medias", f"{df_skel['n_branches'].mean():.1f}")
-        col_s3.metric("Tortuosidad Media", f"{df_skel['tortuosity_mean'].mean():.3f}")
-        col_s4.metric("Índice Ramificación", f"{df_skel['ramification_index'].mean():.2f}")
-        col_s5.metric("Componentes", f"{df_skel['n_connected_components'].median():.0f}")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        col_s1.metric("Longitud Total Media", f"{df_skel['total_branch_length_um'].mean():.1f} µm", help="Suma de longitudes de todas las ramas")
+        col_s2.metric("Índice Ramificación Medio", f"{df_skel['ramification_index'].mean():.2f}", help="Ramas / Uniones")
+        col_s3.metric("Terminaciones Promedio", f"{df_skel['n_endpoints'].mean():.1f}", help="Número de puntas finales")
         
-        # Tabla completa con mejor formato
-        st.markdown("#### Tabla Completa de Métricas Topológicas")
+        # Tabla filtrada
+        st.markdown("#### Tabla de Métricas Clave")
+        cols_to_show = ['label', 'total_branch_length_um', 'ramification_index', 'n_endpoints', 'n_branches', 'n_junctions']
+        # Asegurar que existan
+        cols_to_show = [c for c in cols_to_show if c in df_skel.columns]
+        
         st.dataframe(
-            df_skel.round(3),
+            df_skel[cols_to_show].round(3),
             use_container_width=True,
-            height=400,
+            height=300,
             column_config={
                 "label": st.column_config.NumberColumn("ID", format="%d"),
                 "total_branch_length_um": st.column_config.NumberColumn("Longitud (µm)", format="%.1f"),
-                "n_branches": st.column_config.NumberColumn("Ramas", format="%d"),
-                "n_endpoints": st.column_config.NumberColumn("Terminaciones", format="%d"),
-                "n_junctions": st.column_config.NumberColumn("Bifurcaciones", format="%d"),
-                "tortuosity_mean": st.column_config.NumberColumn("Tortuosidad μ", format="%.3f"),
                 "ramification_index": st.column_config.NumberColumn("Ramificación", format="%.2f"),
-                "termination_index": st.column_config.NumberColumn("Terminación", format="%.2f"),
-                "branch_length_cv": st.column_config.NumberColumn("CV Longitud", format="%.3f"),
-                "n_connected_components": st.column_config.NumberColumn("Componentes", format="%d")
+                "n_endpoints": st.column_config.NumberColumn("Terminaciones", format="%d"),
+                "n_branches": st.column_config.NumberColumn("N° Ramas", format="%d"),
+                "n_junctions": st.column_config.NumberColumn("N° Uniones", format="%d")
             }
         )
         
-        # Gráficos de distribución y correlación
+        # Gráficos Simplificados
         st.markdown("#### Visualizaciones")
-        tab_dist, tab_tort, tab_corr = st.tabs(["📊 Distribuciones", "🌀 Tortuosidad", "🔗 Correlaciones"])
+        col_g1, col_g2 = st.columns(2)
         
-        with tab_dist:
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                chart_length = alt.Chart(df_skel).mark_bar().encode(
-                    x=alt.X('total_branch_length_um:Q', bin=alt.Bin(maxbins=25), title='Longitud Total (µm)'),
-                    y=alt.Y('count()', title='Frecuencia')
-                ).properties(height=250, title="Distribución de Longitud")
-                st.altair_chart(chart_length, use_container_width=True)
-            
-            with col_d2:
-                chart_branches = alt.Chart(df_skel).mark_bar().encode(
-                    x=alt.X('n_branches:Q', bin=alt.Bin(maxbins=20), title='Número de Ramas'),
-                    y=alt.Y('count()', title='Frecuencia')
-                ).properties(height=250, title="Distribución de Ramas")
-                st.altair_chart(chart_branches, use_container_width=True)
-        
-        with tab_tort:
-            chart_tort_hist = alt.Chart(df_skel).mark_bar().encode(
-                x=alt.X('tortuosity_mean:Q', bin=alt.Bin(maxbins=30), title='Tortuosidad Media'),
+        with col_g1:
+            chart_len = alt.Chart(df_skel).mark_bar().encode(
+                x=alt.X('total_branch_length_um:Q', bin=alt.Bin(maxbins=20), title='Longitud Total (µm)'),
                 y=alt.Y('count()', title='Frecuencia')
-            ).properties(height=250, title="Distribución de Tortuosidad")
+            ).properties(height=250, title="Distribución: Longitud Total")
+            st.altair_chart(chart_len, use_container_width=True)
             
-            chart_tort_scatter = alt.Chart(df_skel).mark_circle(size=80).encode(
-                x=alt.X('n_junctions:Q', title='Bifurcaciones'),
-                y=alt.Y('tortuosity_mean:Q', title='Tortuosidad Media'),
-                color=alt.Color('ramification_index:Q', title='Ramificación', scale=alt.Scale(scheme='viridis')),
-                tooltip=['label', 'n_branches', 'tortuosity_mean', 'ramification_index']
-            ).properties(height=250, title="Tortuosidad vs Complejidad").interactive()
-            
-            st.altair_chart(chart_tort_hist, use_container_width=True)
-            st.altair_chart(chart_tort_scatter, use_container_width=True)
-        
-        with tab_corr:
-            # Matriz de correlación para métricas clave
-            metrics_corr = ['total_branch_length_um', 'n_branches', 'tortuosity_mean', 
-                           'ramification_index', 'termination_index', 'branch_length_cv']
-            df_corr = df_skel[metrics_corr].corr()
-            
-            st.markdown("**Matriz de Correlación (Métricas Clave)**")
-            st.dataframe(df_corr.round(3), use_container_width=True)
-            
-            # Scatter plot: Ramificación vs Longitud
-            chart_scatter = alt.Chart(df_skel).mark_circle(size=100, opacity=0.7).encode(
-                x=alt.X('total_branch_length_um:Q', title='Longitud Total (µm)'),
-                y=alt.Y('ramification_index:Q', title='Índice de Ramificación'),
-                size=alt.Size('n_branches:Q', title='N° Ramas'),
-                color=alt.Color('tortuosity_mean:Q', title='Tortuosidad', scale=alt.Scale(scheme='plasma')),
-                tooltip=['label', 'total_branch_length_um', 'ramification_index', 'n_branches', 'tortuosity_mean']
-            ).properties(height=400, title="Longitud vs Ramificación (tamaño=ramas, color=tortuosidad)").interactive()
-            st.altair_chart(chart_scatter, use_container_width=True)
-            
+        with col_g2:
+            chart_ram = alt.Chart(df_skel).mark_bar().encode(
+                x=alt.X('ramification_index:Q', bin=alt.Bin(maxbins=20), title='Índice de Ramificación'),
+                y=alt.Y('count()', title='Frecuencia')
+            ).properties(height=250, title="Distribución: Índice de Ramificación")
+            st.altair_chart(chart_ram, use_container_width=True)
+
     except Exception as e:
         st.error(f"Error leyendo métricas topológicas: {e}")
 
@@ -275,12 +179,9 @@ else:
     try:
         df_sholl_sum = pd.read_csv(p_sholl_sum)
         
-        # Métricas resumen
+        # Métricas resumen (Solo Radio Crítico)
         st.markdown("#### Estadísticas Globales de Sholl")
-        col_sh1, col_sh2, col_sh3 = st.columns(3)
-        col_sh1.metric("AUC Mediana", f"{df_sholl_sum['auc'].median():.1f}", help="Área bajo la curva")
-        col_sh2.metric("Pico Mediano", f"{df_sholl_sum['peak_intersections'].median():.1f}", help="Máximo de intersecciones")
-        col_sh3.metric("Radio Crítico", f"{df_sholl_sum['critical_radius_um'].median():.1f} µm", help="Radio del pico")
+        st.metric("Radio Crítico Mediano", f"{df_sholl_sum['critical_radius_um'].median():.1f} µm", help="Distancia del núcleo donde ocurre la máxima ramificación")
         
         # Tabla de resumen
         st.markdown("#### Tabla de Métricas de Sholl")
@@ -332,107 +233,17 @@ else:
     except Exception as e:
         st.error(f"Error leyendo métricas de Sholl: {e}")
 
-# --- 6. Visualización en Napari ---
+# --- 6. Visualización Interactiva ---
 st.markdown("---")
-st.markdown("### 👁️ Visualización Interactiva")
+st.markdown("### 👁️ Visualización en Napari")
 
-open_napari_2d = st.button("� Visualización 2D Completa", use_container_width=True, 
-                            help="Proyección 2D + máscaras candidatos/finales + esqueletos + anillos Sholl", 
-                            key="napari_2d")
-
-# Visualizador 2D
-if open_napari_2d:
-    try:
-        cal = _read_global_calibration()
-        y, x = float(cal.get('y', 0.3)), float(cal.get('x', 0.3))
-        dapi_idx = int(cal.get("DAPI_CHANNEL_INDEX", 0))
-        gfap_idx = int(cal.get("GFAP_CHANNEL_INDEX", 1))
-        napari_2d_script = root / "streamlit" / "napari_viewer_2d.py"
-        cmd = [sys.executable, str(napari_2d_script), 
-               "--path", str(img_path), "--y", str(y), "--x", str(x),
-               "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
-        
-        # Archivos 2D (máscaras, esqueletos, anillos)
-        gfap_candidates = out_dir / "03_gfap_filtered_mask_2d.tif"  # Candidatos GFAP+
-        final_2d = out_dir / "04_final_astrocytes_mask_2d.tif"  # Astrocitos finales
-        skel_2d = out_dir / "05_skeleton_labels_2d.tif"  # Esqueletos
-        rings = out_dir / "sholl_rings_2d_native.json"  # Anillos Sholl
-        
-        if gfap_candidates.exists():
-            cmd += ["--gfap_2d", str(gfap_candidates)]
-        if final_2d.exists():
-            cmd += ["--final_2d", str(final_2d)]
-        if skel_2d.exists():
-            cmd += ["--skeleton_2d", str(skel_2d)]
-        if rings.exists():
-            cmd += ["--rings", str(rings)]
-        
-        subprocess.Popen(cmd, env=os.environ.copy())
-        st.success("✅ Visualizador 2D de Napari lanzado con todas las capas.")
-    except Exception as e:
-        st.error(f"❌ No se pudo lanzar Napari 2D: {e}")
-
-# --- 3. Métricas de Núcleo (Paso 03) ---
-if p_nuc_metrics.exists():
-    st.markdown("### Métricas de Núcleo (de `03_nucleus_metrics.csv`)")
-    try:
-        df_nuc = pd.read_csv(p_nuc_metrics)
-        st.dataframe(df_nuc.round(3), use_container_width=True)
-        
-        charts_nuc = []
-        charts_nuc.append(alt.Chart(df_nuc).mark_bar().encode(
-            x=alt.X("nucleus_volume_um3:Q", bin=alt.Bin(maxbins=30), title="Volumen Núcleo (µm³)"),
-            y="count()",
-            color=alt.Color("is_astrocyte_candidate:N", title="Candidato")
-        ).properties(height=200))
-        
-        charts_nuc.append(alt.Chart(df_nuc.dropna(subset=['nucleus_sphericity'])).mark_bar().encode(
-            x=alt.X("nucleus_sphericity:Q", bin=alt.Bin(maxbins=30), title="Esfericidad Núcleo"),
-            y="count()",
-            color=alt.Color("is_astrocyte_candidate:N", title="Candidato")
-        ).properties(height=200))
-        
-        st.altair_chart(alt.vconcat(*charts_nuc), use_container_width=True)
-    except Exception as e:
-        st.error(f"No se pudo leer 03_nucleus_metrics.csv: {e}")
-
-# --- 4. Métricas de Sholl (Paso 04) ---
-if p_sholl_sum.exists():
-    st.markdown("### Métricas de Sholl 2D Nativo (de `sholl_summary.csv`)")
-    try:
-        df_sholl_sum = pd.read_csv(p_sholl_sum)
-        
-        s1, s2, s3 = st.columns(3)
-        s1.metric("AUC Mediana", f"{df_sholl_sum['auc'].median():.1f}")
-        s2.metric("Pico Mediano", f"{df_sholl_sum['peak_intersections'].median():.1f}")
-        s3.metric("Radio Crítico Mediano (µm)", f"{df_sholl_sum['critical_radius_um'].median():.1f}")
-        
-        st.dataframe(df_sholl_sum.round(3), use_container_width=True)
-
-        # Perfiles de Sholl por célula
-        if p_sholl_2d.exists():
-            df_sholl_curves = pd.read_csv(p_sholl_2d)
-            st.altair_chart(alt.Chart(df_sholl_curves).mark_line().encode(
-                x=alt.X('radius_um:Q', title='Radio (µm)'), 
-                y=alt.Y('intersections:Q', title='Intersecciones'), 
-                color='label:N'
-            ).properties(height=260, title="Perfiles de Sholl por Célula").interactive(), use_container_width=True)
-
-    except Exception as e:
-        st.error(f"No se pudo leer sholl_2d_native.csv: {e}")
-
-# --- 6. Visualización 3D ---
-st.markdown("---")
-st.markdown("### Ver preparado completo en Napari")
-
-# Botones separados para visualización 3D y 2D
 col_view_1, col_view_2 = st.columns(2)
 with col_view_1:
-    open_napari_3d = st.button("👁️ Visualización 3D completa", use_container_width=True, help="Máscaras 3D en Napari")
+    open_napari_3d = st.button("👁️ Visualización 3D Completa", use_container_width=True, help="Ver máscaras 3D y canales originales")
 with col_view_2:
-    open_napari_2d = st.button("📊 Visualización 2D completa", use_container_width=True, help="Proyección 2D + esqueletos + anillos Sholl")
-    
-# Visualizador 3D completo
+    open_napari_2d = st.button("📊 Visualización 2D (Sholl/Esqueletos)", use_container_width=True, help="Ver proyección, esqueletos y anillos de Sholl")
+
+# Visualizador 3D
 if open_napari_3d:
     try:
         cal = _read_global_calibration()
@@ -448,11 +259,11 @@ if open_napari_3d:
             cmd += ["--final", str(p_final)]
         
         subprocess.Popen(cmd, env=os.environ.copy())
-        st.info("Visualizador 3D de Napari lanzado.")
+        st.info("✅ Visualizador 3D lanzado.")
     except Exception as e:
-        st.error(f"No se pudo lanzar Napari 3D: {e}")
+        st.error(f"❌ Error al lanzar Napari 3D: {e}")
 
-# Visualizador 2D completo  
+# Visualizador 2D
 if open_napari_2d:
     try:
         cal = _read_global_calibration()
@@ -464,16 +275,19 @@ if open_napari_2d:
                "--path", str(img_path), "--y", str(y), "--x", str(x),
                "--dapi_idx", str(dapi_idx), "--gfap_idx", str(gfap_idx)]
         
-        # Archivos 2D
+        # Pasando archivos generados
+        # Nota: Usamos nombres estandarizados
+        gfap_candidates = out_dir / "03_gfap_filtered_mask_2d.tif"
+        final_2d = out_dir / "04_final_astrocytes_mask_2d.tif" 
         skel_2d = out_dir / "05_skeleton_labels_2d.tif"
         rings = out_dir / "sholl_rings_2d_native.json"
         
-        if skel_2d.exists():
-            cmd += ["--skeleton_2d", str(skel_2d)]
-        if rings.exists():
-            cmd += ["--rings", str(rings)]
+        if gfap_candidates.exists(): cmd += ["--gfap_2d", str(gfap_candidates)]
+        if final_2d.exists(): cmd += ["--final_2d", str(final_2d)]
+        if skel_2d.exists(): cmd += ["--skeleton_2d", str(skel_2d)]
+        if rings.exists(): cmd += ["--rings", str(rings)]
         
         subprocess.Popen(cmd, env=os.environ.copy())
-        st.info("Visualizador 2D de Napari lanzado.")
+        st.info("✅ Visualizador 2D lanzado.")
     except Exception as e:
-        st.error(f"No se pudo lanzar Napari 2D: {e}")
+        st.error(f"❌ Error al lanzar Napari 2D: {e}")

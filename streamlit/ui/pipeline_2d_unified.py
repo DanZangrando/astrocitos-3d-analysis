@@ -477,8 +477,12 @@ def run_unified_2d_skeleton_and_sholl(
             if not branch_data.empty:
                 n_branches = len(branch_data)
                 total_branch_length = branch_data['branch-distance'].sum()
-                n_endpoints = int(branch_data['branch-type'].value_counts().get(1, 0))
-                n_junctions = int(branch_data['branch-type'].value_counts().get(2, 0))
+                
+                # Robust counting using degrees from the graph
+                # degrees: degree of each node index
+                degrees = skel_obj.degrees
+                n_endpoints = int(np.sum(degrees == 1))
+                n_junctions = int(np.sum(degrees > 2))
                 
                 # NUEVAS MÉTRICAS DE TORTUOSIDAD
                 tortuosity = branch_data['branch-distance'] / branch_data['euclidean-distance'].replace(0, np.nan)

@@ -5,137 +5,115 @@ from ui.utils import detect_group
 import json
 from datetime import datetime
 import pandas as pd
-import subprocess # <--- CORRECCIÓN
-import os # <--- CORRECCIÓN
+import subprocess
+import os
 
-# Welcome page content based on project README
-st.set_page_config(page_title="Astrocitos 3D - Análisis", page_icon="🧠", layout="wide")
-
-st.title("Análisis Morfológico 3D de Astrocitos")
-render_sidebar(show_calibration=True)
-
-st.markdown(
-    """
-    **Proyecto:** Reconstrucción, segmentación y análisis morfológico 3D de astrocitos (GFAP) y núcleos (DAPI) a partir de imágenes `.lif`/`.tif`.
-
-    **Tecnologías:** Python, Streamlit, Napari, Cellpose, scikit-image, SciPy, Skan
-
-    ---
-
-    ### Flujo del pipeline
-    El flujo de procesamiento unificado (4 pasos):
-    1. **Calibración (01):** Lectura de `calibration.json` para µm/px → Máscara Otsu de fondo DAPI
-    2. **Segmentación (02):** Cellpose 3D → `02_cellpose_mask.tif`
-    3. **Filtrado (03):** 
-       - Filtrado GFAP relativo (StdDev sobre fondo) → `03_gfap_filtered_mask.tif`
-       - Filtrado por tamaño físico → `04_final_astrocytes_mask.tif`
-    4. **Esqueletización + Sholl (04):** **Pipeline 2D unificado**
-       - Proyección 3D→2D (max projection)
-       - Territorios Voronoi con zona de exclusión
-       - Esqueletización 2D por territorio con conexión de fragmentos
-       - Análisis de Sholl 2D nativo integrado (SKAN)
-       - Genera `05_skeleton_labels_2d.tif`, `sholl_2d_native.csv`, `sholl_summary.csv`, `sholl_rings_2d_native.json`
-    
-    **Ventajas del flujo 2D nativo:**
-    - ✅ Resolución XY completa (0.38 µm) sin degradación
-    - ✅ Sholl 2D más preciso y eficiente
-    - ✅ Territorios astrocitarios bien definidos para preparados planos
-    - ✅ Más rápido (~10x) que esqueletización 3D con remuestreo isotrópico
-    """
+# Configuración de página
+st.set_page_config(
+    page_title="Astrocitos 3D - Análisis", 
+    page_icon="🧠", 
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.info("Usá el menú lateral para navegar el pipeline. La calibración y parámetros globales viven en streamlit/calibration.json; los resultados por preparado quedan en data/processed/<preparado>/.")
+# Título y Sidebar
+st.title("🧠 Análisis Morfológico de Astrocitos")
+render_sidebar(show_calibration=True)
 
-# Inspector/Editor de configuración unificada
+# Descripción del Proyecto
+st.markdown("""
+### 📌 Descripción del Proyecto
+Plataforma interactiva para la **reconstrucción, segmentación y análisis morfológico** de astrocitos a partir de microscopía confocal. 
+El sistema está diseñado para caracterizar la reactividad astrocitaria mediante biomarcadores topológicos robustos.
+
+---
+
+### 🚀 Flujo de Trabajo (Pipeline)
+
+El análisis se estructura en 5 pasos secuenciales:
+
+1.  **Calibración y Visualización (01)**: Definición de la escala física (µm/pixel) y control de calidad de la imagen cruda.
+2.  **Segmentación Nuclear (02)**: Identificación de nucleos (DAPI) mediante Deep Learning (**Cellpose**).
+3.  **Filtrado de Astrocitos (03)**: Selección de núcleos correspondientes a astrocitos mediante colocalización de señal **GFAP** (filtro de intensidad relativo) y tamaño físico.
+4.  **Esqueletización y Sholl** (04): 
+    *   Proyección inteligente 3D → 2D.
+    *   Definición de territorios celulares (Voronoi con exclusión).
+    *   Esqueletización topológica y análisis de **Sholl** nativo.
+5.  **Análisis por Preparado (05)**: Validación y exploración de resultados individuales.
+6.  **Comparación de Grupos (06)**: Análisis estadístico robusto (**CTL vs Hipoxia**) evitando pseudoreplicación.
+
+---
+
+### 📊 Biomarcadores Clave
+
+Para caracterizar la morfología, el sistema se enfoca en 4 métricas validadas:
+
+| Métrica | Significado Biológico | Tipo |
+| :--- | :--- | :--- |
+| **Radio Crítico (Sholl)** | Distancia de máxima arborización. Indica la *expansión espacial*. | Sholl |
+| **Índice de Ramificación** | Relación Ramas/Uniones. Refleja la *complejidad topológica*. | Topología |
+| **Longitud Total del Esqueleto** | Suma de todas las ramas. Indica el *volumen de exploración*. | Topología |
+| **Número de Terminaciones** | Puntos finales de las ramas. Indica la *división terminal*. | Topología |
+
+---
+""")
+
+st.info("💡 **Tip:** Usá el menú lateral para navegar paso a paso. Los resultados se guardan automáticamente en `data/processed/`.")
+
+# --- Inspector Configuración ---
 root = Path(__file__).resolve().parents[1]
 calib_path = root / "streamlit" / "calibration.json"
 
-st.markdown("---")
-st.subheader("Inspector de configuración global (calibration.json)")
+with st.expander("🛠️ Configuración Global (calibration.json)", expanded=False):
+    def _load_calib() -> dict:
+        if calib_path.exists():
+            try: return json.loads(calib_path.read_text())
+            except: return {}
+        return {}
 
-def _load_calib() -> dict:
-    if calib_path.exists():
-        try:
-            return json.loads(calib_path.read_text())
-        except Exception:
-            return {}
-    return {}
+    cfg = _load_calib()
+    st.json(cfg)
 
-def _save_calib(data: dict):
-    calib_path.parent.mkdir(parents=True, exist_ok=True)
-    calib_path.write_text(json.dumps(data, indent=2))
-
-cfg = _load_calib()
-
-colv1, colv2 = st.columns(2)
-with colv1:
-    st.caption("Vista actual (solo lectura)")
-    st.json(cfg or {})
-with colv2:
-    st.caption("Editar como JSON (avanzado)")
-    raw = st.text_area("Contenido de calibration.json", value=json.dumps(cfg, indent=2), height=260)
-    bcol1, bcol2 = st.columns(2)
-    with bcol1:
-        if st.button("💾 Guardar cambios"):
-            try:
-                new_cfg = json.loads(raw) if raw.strip() else {}
-            except Exception as e:
-                st.error(f"JSON inválido: {e}")
-            else:
-                _save_calib(new_cfg)
-                st.success("Cambios guardados. Recargá la página (F5) para aplicar.")
-                st.rerun()
-    with bcol2:
-        if st.button("🧰 Exportar backup con timestamp"):
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup_path = calib_path.with_name(f"calibration.backup-{ts}.json")
-            backup_path.write_text(json.dumps(cfg, indent=2))
-            st.info(f"Backup exportado: {backup_path.relative_to(root)}")
-
-# --- Dashboard del pipeline por preparado (ACTUALIZADO) ---
-st.markdown("---")
-st.subheader("Estado del pipeline por preparado")
+# --- Dashboard de Estado ---
+st.markdown("### 📋 Estado de Procesamiento por Preparado")
 
 raw_dir = root / "data" / "raw"
 files = sorted([p for p in raw_dir.rglob("*.tif")] + [p for p in raw_dir.rglob("*.tiff")])
 
 if files:
     stem_to_group_all = {p.stem: detect_group(p, root) for p in files}
-
-    group_filter = st.session_state.get("group_filter", "Todos")
-    files_filtered = files if group_filter == "Todos" else [p for p in files if stem_to_group_all.get(p.stem, "CTL") == group_filter]
-
+    
     rows = []
-    for p in files_filtered:
+    for p in files:
         od = root / "data" / "processed" / p.stem
         rows.append({
-            "prepared": p.stem,
-            "group": stem_to_group_all.get(p.stem, "CTL"),
-            "02_Nucleos": (od/"02_cellpose_mask.tif").exists(),
-            "03_Metricas_Nucleo": (od/"03_nucleus_metrics.csv").exists(),
-            "04_Astrocitos": (od/"04_final_astrocytes_mask.tif").exists(),
-            "04_Skeleton_2D": (od/"05_skeleton_labels_2d.tif").exists(),
-            "04_Sholl_2D": (od/"sholl_2d_native.csv").exists(),
+            "Preparado": p.stem,
+            "Grupo": stem_to_group_all.get(p.stem, "CTL"),
+            "1. Calibrado": (root / "streamlit" / "calibration.json").exists(), # Global por ahora
+            "2. Núcleos": (od/"02_cellpose_mask.tif").exists(),
+            "3. Filtrado": (od/"03_gfap_filtered_mask.tif").exists(),
+            "4. Esqueletos/Sholl": (od/"skeletons"/"summary.csv").exists() and (od/"sholl_summary.csv").exists(),
+            "5. Analizado": (od/"skeletons"/"summary.csv").exists()
         })
     
     df_state = pd.DataFrame(rows)
     
     if not df_state.empty:
-        def mark(col):
-            return df_state[col].map(lambda v: "✅" if bool(v) else "—")
+        # Formato visual
+        def mark(val): return "✅ Completo" if val else "—"
         
         view = df_state.copy()
-        # Actualizar los nombres de las columnas para el dashboard
-        cols_to_check = [
-            "02_Nucleos", "03_Metricas_Nucleo", "04_Astrocitos", 
-            "04_Skeleton_2D", "04_Sholl_2D"
-        ]
-        for c in cols_to_check:
-            if c in view.columns:
-                view[c] = mark(c)
-                
-        st.dataframe(view.set_index(["prepared","group"]), use_container_width=True)
+        for c in ["1. Calibrado", "2. Núcleos", "3. Filtrado", "4. Esqueletos/Sholl", "5. Analizado"]:
+            view[c] = view[c].apply(mark)
+            
+        st.dataframe(
+            view.set_index("Preparado"),
+            use_container_width=True,
+            column_config={
+                "Grupo": st.column_config.TextColumn("Grupo", width="small"),
+            }
+        )
     else:
-        st.info("No hay preparados para mostrar con el filtro actual.")
+        st.info("No hay datos procesados para mostrar.")
 else:
-    st.info("No se encontraron archivos en data/raw. Cargá tu dataset para ver el dashboard.")
+    st.warning("No se encontraron imágenes en `data/raw`. Por favor cargá tus datos para comenzar.")

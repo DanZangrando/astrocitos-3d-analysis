@@ -260,68 +260,48 @@ if skeleton_summary_path.exists():
     st.markdown("### 📊 Métricas de Esqueletización")
     st.dataframe(df_skel, use_container_width=True, height=300)
     
-    # Métricas resumidas con tabs
-    tab1, tab2, tab3 = st.tabs(["📏 Básicas", "🌀 Tortuosidad", "🔀 Complejidad"])
+    # Métricas Clave (Solo las solicitadas)
+    st.markdown("#### Métricas Clave")
+    col1, col2, col3 = st.columns(3)
     
-    with tab1:
-        col1, col2, col3, col4 = st.columns(4)
+    if 'total_branch_length_um' in df_skel.columns:
+        col1.metric("Longitud Total Promedio", f"{df_skel['total_branch_length_um'].mean():.1f} µm", help="Suma de longitudes de ramas")
+    
+    if 'ramification_index' in df_skel.columns:
+        col2.metric("Índice de Ramificación Promedio", f"{df_skel['ramification_index'].mean():.2f}", help="Ramas / Uniones")
+        
+    if 'n_endpoints' in df_skel.columns:
+        col3.metric("Terminaciones Promedio", f"{df_skel['n_endpoints'].mean():.1f}", help="Número de puntas finales")
+    
+    # Gráficos de distribución de las métricas clave
+    st.markdown("#### Distribuciones")
+    col_g1, col_g2, col_g3 = st.columns(3)
+    
+    with col_g1:
         if 'total_branch_length_um' in df_skel.columns:
-            col1.metric("Long. total promedio", f"{df_skel['total_branch_length_um'].mean():.1f} µm")
-        if 'n_endpoints' in df_skel.columns:
-            col2.metric("Endpoints promedio", f"{df_skel['n_endpoints'].mean():.1f}")
-        if 'n_junctions' in df_skel.columns:
-            col3.metric("Junctions promedio", f"{df_skel['n_junctions'].mean():.1f}")
-        if 'n_branches' in df_skel.columns:
-            col4.metric("Ramas promedio", f"{df_skel['n_branches'].mean():.1f}")
-    
-    with tab2:
-        col1, col2, col3 = st.columns(3)
-        if 'tortuosity_mean' in df_skel.columns:
-            col1.metric("Tortuosidad media", f"{df_skel['tortuosity_mean'].mean():.3f}", 
-                       help="1.0 = recto, >1.0 = sinuoso")
-            col2.metric("Tortuosidad máxima", f"{df_skel['tortuosity_max'].mean():.3f}")
-            col3.metric("Desv. std tortuosidad", f"{df_skel['tortuosity_std'].mean():.3f}",
-                       help="Mayor valor = mayor heterogeneidad")
-        
-        # Gráfico de tortuosidad
-        if 'tortuosity_mean' in df_skel.columns:
-            chart_tort = alt.Chart(df_skel).mark_bar().encode(
-                x=alt.X('tortuosity_mean:Q', bin=alt.Bin(maxbins=20), title='Tortuosidad Media'),
+            chart = alt.Chart(df_skel).mark_bar().encode(
+                x=alt.X('total_branch_length_um:Q', bin=alt.Bin(maxbins=20), title='Longitud de esqueleto (µm)'),
                 y=alt.Y('count()', title='Frecuencia')
-            ).properties(width=600, height=250, title='Distribución de Tortuosidad (1.0 = recto)')
-            st.altair_chart(chart_tort, use_container_width=True)
-    
-    with tab3:
-        col1, col2, col3 = st.columns(3)
+            ).properties(height=250, title='Distribución: Longitud Total')
+            st.altair_chart(chart, use_container_width=True)
+            
+    with col_g2:
         if 'ramification_index' in df_skel.columns:
-            col1.metric("Índice de Ramificación", f"{df_skel['ramification_index'].mean():.2f}",
-                       help="Ramas / Junctions - Mayor = más complejo")
-        if 'termination_index' in df_skel.columns:
-            mean_term = df_skel['termination_index'].mean()
-            col2.metric("Índice de Terminalización", f"{mean_term:.2f}" if not np.isnan(mean_term) else "N/A",
-                       help="Endpoints / Junctions - Balance ramificación/extensión")
-        if 'branch_length_cv' in df_skel.columns:
-            col3.metric("CV Longitud Ramas", f"{df_skel['branch_length_cv'].mean():.2f}",
-                       help="Coef. variación - Mayor = más heterogeneidad")
-        
-        # Gráfico de complejidad
-        if 'ramification_index' in df_skel.columns and 'tortuosity_mean' in df_skel.columns:
-            chart_complex = alt.Chart(df_skel).mark_circle(size=100).encode(
-                x=alt.X('ramification_index:Q', title='Índice de Ramificación'),
-                y=alt.Y('tortuosity_mean:Q', title='Tortuosidad Media'),
-                color=alt.Color('n_junctions:Q', title='N° Junctions', scale=alt.Scale(scheme='viridis')),
-                tooltip=['label', 'ramification_index', 'tortuosity_mean', 'n_junctions']
-            ).properties(width=600, height=300, title='Complejidad vs Tortuosidad')
-            st.altair_chart(chart_complex, use_container_width=True)
+            chart_ram = alt.Chart(df_skel).mark_bar().encode(
+                x=alt.X('ramification_index:Q', bin=alt.Bin(maxbins=20), title='Índice de Ramificación'),
+                y=alt.Y('count()', title='Frecuencia')
+            ).properties(height=250, title='Distribución: Índice de Ramificación')
+            st.altair_chart(chart_ram, use_container_width=True)
+            
+    with col_g3:
+        if 'n_endpoints' in df_skel.columns:
+            chart_end = alt.Chart(df_skel).mark_bar().encode(
+                x=alt.X('n_endpoints:Q', bin=alt.Bin(maxbins=20), title='Terminaciones'),
+                y=alt.Y('count()', title='Frecuencia')
+            ).properties(height=250, title='Distribución: Terminaciones')
+            st.altair_chart(chart_end, use_container_width=True)
     
-    # Gráfico de distribución de longitudes (movido abajo)
-    if 'skeleton_length_um' in df_skel.columns:
-        st.markdown("#### Distribución de Longitudes Totales")
-        chart = alt.Chart(df_skel).mark_bar().encode(
-            x=alt.X('skeleton_length_um:Q', bin=True, title='Longitud de esqueleto (µm)'),
-            y=alt.Y('count()', title='Frecuencia')
-        ).properties(width=600, height=250, title='Longitud Total del Esqueleto')
-        st.altair_chart(chart, use_container_width=True)
+
 else:
     st.info("⏳ No hay métricas de esqueleto disponibles. Ejecutá el pipeline primero.")
 
