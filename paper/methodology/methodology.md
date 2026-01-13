@@ -1,26 +1,6 @@
 
 # Methodology
 
-## 0. Pre-procesamiento y Filtrado de Z-Stacks
-
-Antes de iniciar el pipeline de análisis interactivo, los datos crudos fueron sometidos a un proceso de estandarización automatizado para garantizar la comparabilidad entre muestras.
-
-### Descripción del Proceso
-
-El script `preprocess_z_stacks.py` recorre recursivamente el directorio de datos crudos (`data/raw`) realizando las siguientes operaciones:
-
-1.  **Selección de Planos Z (Z-Stacking)**:
-    -   Se identifica la ventana de **10 planos Z continuos** que maximiza la intensidad acumulada en el canal de GFAP (Canal 1). Esto asegura que se analice la región con mayor presencia de astrocitos, descartando planos vacíos o con baja señal.
-    -   Imágenes con menos de 10 planos son reportadas pero mantenidas (con advertencia).
-    -   Imágenes que ya cumplen con el criterio de 10 planos se copian sin recorte.
-
-2.  **Filtrado de Canales**:
-    -   Se eliminan canales adicionales, conservando estrictamente los dos primeros:
-        -   **Canal 0**: DAPI (Azul).
-        -   **Canal 1**: GFAP (Verde).
-
-3.  **Corrección de Metadatos de Color**:
-    -   Se reescriben los metadatos ImageJ (LUTs) para asegurar que la visualización predeterminada asigne correctamente el color Azul al DAPI y Verde al GFAP.
 
 ### Librerías Principales
 
