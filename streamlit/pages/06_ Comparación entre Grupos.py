@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 from scipy import stats
+import pingouin as pg
 import streamlit as st
 from ui.sidebar import render_sidebar
 from ui.plots import GROUP_SCALE, PALETTE, boxplot_with_ticks, apply_theme
@@ -109,6 +110,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
     rows_skel = []
     rows_sholl = []
     rows_nuc = []
+    rows_sholl_raw = [] # New list for raw profiles
     
     for p in files:
         od = proc_dir / p.stem
@@ -118,7 +120,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         ps = od / "skeletons" / "summary.csv"
         if ps.exists():
             try:
-                df = pd.read_csv(ps); df['prepared'] = p.name; df['group'] = group
+                df = pd.read_csv(ps); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
                 rows_skel.append(df)
             except Exception: pass
         
@@ -126,20 +128,31 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         pss = od / "sholl_summary.csv"
         if pss.exists():
             try:
-                df = pd.read_csv(pss); df['prepared'] = p.name; df['group'] = group
+                df = pd.read_csv(pss); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
                 rows_sholl.append(df)
+            except Exception: pass
+
+        # 2b. Cargar Perfiles Raw de Sholl (sholl_2d_native.csv)
+        pr = od / "sholl_2d_native.csv"
+        if pr.exists():
+            try:
+                # Cargar solo columnas necesarias para ahorrar memoria
+                df = pd.read_csv(pr, usecols=['label', 'radius_um', 'intersections']) 
+                df['prepared'] = f"{group}-{p.stem}"
+                df['group'] = group
+                rows_sholl_raw.append(df)
             except Exception: pass
             
         # 3. Cargar métricas de núcleo (03_nucleus_metrics.csv)
         pn = od / "03_nucleus_metrics.csv"
         if pn.exists():
             try:
-                df = pd.read_csv(pn); df['prepared'] = p.name; df['group'] = group
+                df = pd.read_csv(pn); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
                 rows_nuc.append(df)
             except Exception: pass
 
-    if not rows_skel and not rows_sholl and not rows_nuc:
-        return None, None
+    if not rows_skel and not rows_sholl and not rows_nuc and not rows_sholl_raw:
+        return None, None, None
 
     # --- Fusión y Agregación ---
     df_skel_all = pd.concat(rows_skel, ignore_index=True) if rows_skel else pd.DataFrame()
@@ -209,14 +222,20 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
     valid_cols_to_agg = [col for col in cols_to_agg if col in df_plot.columns]
     
     if not valid_cols_to_agg or 'prepared' not in df_plot.columns or 'group' not in df_plot.columns:
-        return df_plot, pd.DataFrame() # No hay suficientes datos
+        return df_plot, pd.DataFrame(), pd.DataFrame() # No hay suficientes datos
 
     df_stats = df_plot.groupby(['prepared', 'group'])[valid_cols_to_agg].median().reset_index()
     
-    return df_plot, df_stats
+    # --- Fusión de Curvas Sholl (Raw) ---
+    # Necesitamos cargar los perfiles raw para la gráfica de curvas
+    df_sholl_curves = pd.DataFrame()
+    if rows_sholl_raw:
+        df_sholl_curves = pd.concat(rows_sholl_raw, ignore_index=True)
+    
+    return df_plot, df_stats, df_sholl_curves
 
 # --- Cargar Datos ---
-df_plot, df_stats = load_all_metrics(RAW_DIR, PROC_DIR)
+df_plot, df_stats, df_sholl_curves = load_all_metrics(RAW_DIR, PROC_DIR)
 
 if df_plot is None or df_stats is None:
     st.error("No se encontraron métricas procesadas (summary.csv, sholl_summary.csv, etc.) en `data/processed`.")
@@ -376,6 +395,108 @@ else:
     except Exception as e:
         st.caption(f"Error al calcular estadísticas: {e}")
         st.exception(e)
+
+
+st.markdown("---")
+st.markdown("### 📈 Análisis de Curvas de Sholl")
+
+if df_sholl_curves.empty:
+    st.info("No hay datos de curvas Sholl disponibles para comparar.")
+else:
+    # 1. Agregación Robusta: Promedio por preparado primero (evita pseudoreplicación)
+    # Unidad experimental = Preparado
+    df_sholl_prep = df_sholl_curves.groupby(['group', 'prepared', 'radius_um'])['intersections'].mean().reset_index()
+    
+    # 2. Visualización (Media ± SEM de los preparados)
+    st.markdown("**Perfiles de Sholl (Media ± Error Estándar de los Preparados)**")
+    
+    base = alt.Chart(df_sholl_prep).encode(
+        x=alt.X('radius_um:Q', title='Radio (µm)'),
+        color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c']))
+    )
+    
+    line = base.mark_line(point=False).encode(
+        y=alt.Y('mean(intersections):Q', title='Intersecciones (Media)')
+    )
+    
+    band = base.mark_errorband(extent='stderr').encode(
+        y=alt.Y('intersections:Q', title='Intersecciones')
+    )
+    
+    chart_sholl = (band + line).properties(height=400)
+    st.altair_chart(chart_sholl, use_container_width=True)
+    
+    # 3. Estadística (Mixed ANOVA)
+    st.markdown("**Análisis Estadístico (ANOVA Mixto)**")
+    st.caption("Factor Entre-Sujetos: Grupo | Factor Intra-Sujetos: Radio | Sujeto: Preparado")
+    
+    try:
+        # Verificar requisitos de datos para ANOVA
+        # Necesitamos que todos los sujetos tengan datos en los mismos radios (balanceado idealmente)
+        # O al menos suficientes datos. Pingouin maneja datos desbalanceados, pero hay límites.
+        
+        n_groups = df_sholl_prep['group'].nunique()
+        n_preps = df_sholl_prep['prepared'].nunique()
+        
+        if n_groups < 2 or n_preps < 4:
+            st.warning("⚠️ Insuficientes datos para calcular ANOVA (se requieren al menos 2 grupos y múltiples preparados).")
+        else:
+            with st.spinner("Calculando ANOVA Mixto..."):
+                # Ejecutar ANOVA Mixto
+                aov = pg.mixed_anova(
+                    data=df_sholl_prep, 
+                    dv='intersections', 
+                    within='radius_um', 
+                    between='group', 
+                    subject='prepared'
+                )
+                
+                # Formatear tabla para mostrar
+                st.dataframe(
+                    aov.round(4),
+                    use_container_width=True,
+                    column_config={
+                        "Source": "Fuente de Variación",
+                        "SS": "Suma Cuadrados",
+                        "DF1": "GL1",
+                        "DF2": "GL2",
+                        "MS": "Cuad. Medio",
+                        "F": "F",
+                        "p-unc": "P-valor",
+                        "np2": "Eta² parcial"
+                    }
+                )
+                
+                # Interpretación automática
+                p_interaction = aov.loc[aov['Source'] == 'Interaction', 'p-unc'].values[0]
+                p_group = aov.loc[aov['Source'] == 'group', 'p-unc'].values[0]
+                
+                res_str = ""
+                if p_interaction < 0.05:
+                    res_str += f"🔴 **Interacción Significativa (p={p_interaction:.3f}):** El perfil de ramificación difiere significativamente entre grupos a lo largo del radio."
+                else:
+                    res_str += f"⚪ **Interacción No Significativa (p={p_interaction:.3f}):** Los perfiles tienen formas similares."
+                    
+                if p_group < 0.05:
+                    res_str += f" | 🟠 **Efecto de Grupo Significativo (p={p_group:.3f}):** Existe una diferencia global en la complejidad."
+                
+                st.info(res_str)
+                
+                with st.expander("📖 ¿Cómo leer esta tabla?"):
+                    st.markdown("""
+                    **Fuentes de Variación (Source):**
+                    *   **group**: ¿Hay diferencias totales entre CTL y Hipoxia? (e.g. uno tiene más ramas en general).
+                    *   **radius_um**: Efecto de la distancia (siempre significativo en Sholl).
+                    *   **Interaction**: ¿Cambia la *forma* de la curva? (CRÍTICO: Si es significativo, los grupos tienen arquitecturas diferentes, no solo más/menos ramas).
+                    
+                    **Indicadores:**
+                    *   **P-valor**: Probabilidad de error. Si es < 0.05, el efecto es real.
+                    *   **Eta² parcial**: Tamaño del efecto (0.01=pequeño, 0.06=medio, 0.14=grande). Indica qué % de la varianza explica ese factor.
+                    """)
+                
+    except Exception as e:
+        st.error(f"No se pudo calcular ANOVA: {e}")
+        st.caption("Verificá que los radios sean consistentes entre preparados.")
 
 st.markdown("---")
 st.markdown("### 📊 Datos Agregados y Exportación")
