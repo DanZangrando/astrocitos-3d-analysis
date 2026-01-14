@@ -161,6 +161,7 @@ El módulo de comparación realiza una carga masiva de todos los datos procesado
     -   Si ambos grupos son normales: Se aplica el **Test t de Welch** (no asume varianzas iguales).
     -   Si alguno no es normal: Se aplica el test no paramétrico **U de Mann-Whitney**.
     -   El sistema reporta automáticamente el estadístico, el p-valor y el tamaño muestral (N).
+    -   **Para análisis de curvas (Sholl)**: Se aplica un **ANOVA Mixto (Mixed ANOVA)** considerando el *Grupo* como factor entre-sujetos y el *Radio* como factor intra-sujetos, evaluando la interacción Grupo × Radio.
 
 ### Librerías Principales
 
