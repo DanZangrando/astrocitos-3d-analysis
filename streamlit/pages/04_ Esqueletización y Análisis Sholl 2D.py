@@ -144,7 +144,7 @@ with st.expander("⚙️ Configuración de Proyección y Territorios", expanded=
 
 with st.expander("🎯 Dominio de Análisis", expanded=True):
     st.markdown("""
-    **Radio máximo desde núcleo:** Define hasta qué distancia del soma se considera 
+    **Radio máximo desde núcleo:** Define hasta qué distancia del núcleo se considera 
     que un proceso GFAP pertenece al astrocito. Esto elimina señal de fondo lejana 
     y mejora la precisión del análisis.
     """)
@@ -159,8 +159,30 @@ with st.expander("🎯 Dominio de Análisis", expanded=True):
              "Valores típicos: 80-120 µm para astrocitos hipocampales."
     )
     
-    st.caption("💡 **Tip:** Si los astrocitos tienen procesos muy largos (>100 µm), "
-               "aumentar este valor. Si hay mucho ruido de fondo, reducirlo.")
+    st.caption("💡 **Tip:** Si los astrocitos tienen procesos muy largos (>100 µm), aumentar este valor.")
+
+    st.markdown("---")
+    st.markdown("**Contacto y Poda (Mejora de Esqueleto):**")
+    
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        nucleus_contact_radius_um = st.number_input(
+            "Radio de contacto nuclear (µm)",
+            value=float(glob_calib.get("NUCLEUS_CONTACT_RADIUS_UM", 2.0)),
+            min_value=0.0,
+            max_value=20.0,
+            step=0.5,
+            help="Expande artificialmente el área de origen del núcleo para atrapar mangas GFAP próximas que no solapan con el núcleo puro."
+        )
+    with col_d2:
+        pruning_min_voxels = st.number_input(
+            "Umbral de Poda (Mínimo de vóxeles)",
+            value=int(glob_calib.get("PRUNING_MIN_VOXELS", 3)),
+            min_value=0,
+            max_value=50,
+            step=1,
+            help="Poda ramas terminales y vóxeles aislados del esqueleto que tengan menos longitud en píxeles que este valor."
+        )
 
 with st.expander("📏 Parámetros de Sholl", expanded=False):
     col1, col2, col3 = st.columns(3)
@@ -197,6 +219,8 @@ if st.button("💾 Guardar configuración global"):
         "CONNECT_SKELETON_FRAGMENTS": connect_fragments,
         "CONNECTION_RADIUS_UM": connection_radius,
         "MAX_RADIUS_FROM_NUCLEUS_UM": max_radius_nucleus,
+        "NUCLEUS_CONTACT_RADIUS_UM": nucleus_contact_radius_um,
+        "PRUNING_MIN_VOXELS": pruning_min_voxels,
         "SHOLL_MIN_RADIUS_UM": sholl_min,
         "SHOLL_MAX_RADIUS_UM": sholl_max,
         "SHOLL_STEP_UM": sholl_step
@@ -219,6 +243,8 @@ if st.button("🚀 Ejecutar Esqueletización + Sholl 2D", type="primary"):
                 "CONNECT_SKELETON_FRAGMENTS": connect_fragments,
                 "CONNECTION_RADIUS_UM": connection_radius,
                 "MAX_RADIUS_FROM_NUCLEUS_UM": max_radius_nucleus,
+                "NUCLEUS_CONTACT_RADIUS_UM": nucleus_contact_radius_um,
+                "PRUNING_MIN_VOXELS": pruning_min_voxels,
                 "SHOLL_MIN_RADIUS_UM": sholl_min,
                 "SHOLL_MAX_RADIUS_UM": sholl_max,
                 "SHOLL_STEP_UM": sholl_step

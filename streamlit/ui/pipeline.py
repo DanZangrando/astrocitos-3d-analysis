@@ -683,6 +683,9 @@ def run_skeleton_2d_native_skan(
     # Obtener parámetro de expansión territorial
     if territory_expansion_um is None:
         territory_expansion_um = float(cal.get("TERRITORY_EXPANSION_UM", 10.0))
+        
+    nucleus_contact_radius_um = float(cal.get("NUCLEUS_CONTACT_RADIUS_UM", 2.0))
+    pruning_min_voxels = int(cal.get("PRUNING_MIN_VOXELS", 3))
     
     # 1. Proyectar las máscaras 3D a 2D
     proj_method = str(cal.get("PROJECTION_2D_METHOD", "max")).lower()
@@ -707,6 +710,9 @@ def run_skeleton_2d_native_skan(
     expansion_radius_px_y = int(territory_expansion_um / y_um)
     expansion_radius_px_x = int(territory_expansion_um / x_um)
     
+    contact_radius_px_y = int(nucleus_contact_radius_um / y_um)
+    contact_radius_px_x = int(nucleus_contact_radius_um / x_um)
+    
     skel_dir = out_dir / "skeletons"
     skel_dir.mkdir(parents=True, exist_ok=True)
     
@@ -730,10 +736,18 @@ def run_skeleton_2d_native_skan(
             
             if not np.any(nuclear_mask):
                 continue
+                
+            # 1.5. Expandir contacto nuclear para atrapar ramificaciones lejanas a la raíz
+            if contact_radius_px_y > 0 or contact_radius_px_x > 0:
+                contact_element = disk(max(contact_radius_px_y, contact_radius_px_x))
+                contact_mask = binary_dilation(nuclear_mask, contact_element)
+            else:
+                contact_mask = nuclear_mask.copy()
             
             # 2. Expandir territorio alrededor del núcleo
             # Usar elemento estructurante elíptico para mejor expansión isotrópica
-            expansion_element = disk(max(expansion_radius_px_y, expansion_radius_px_x))
+            max_r = max(expansion_radius_px_y, expansion_radius_px_x, contact_radius_px_y, contact_radius_px_x)
+            expansion_element = disk(max_r)
             territorial_mask = binary_dilation(nuclear_mask, expansion_element)
             
             # 3. Extraer señal GFAP en territorio expandido
@@ -759,15 +773,118 @@ def run_skeleton_2d_native_skan(
             # 5. Restringir a territorio (quitar ruido externo)
             gfap_binary = gfap_binary & territorial_mask
             
+            # 5.5. Filtrar por conectividad al núcleo (o área de contacto expandida)
+            from skimage.measure import label as cc_label
+            cc_gfap = cc_label(gfap_binary, connectivity=2)
+            connected_labels = np.unique(cc_gfap[contact_mask])
+            connected_labels = connected_labels[connected_labels > 0]
+            
+            if len(connected_labels) > 0:
+                gfap_binary = np.isin(cc_gfap, connected_labels)
+            else:
+                gfap_binary = np.zeros_like(gfap_binary)
+            
             # 6. Esqueletizar señal GFAP binarizada
             if not np.any(gfap_binary):
-                print(f"  Astrocito {label}: sin señal GFAP significativa")
+                print(f"  Astrocito {label}: sin señal GFAP conectada al núcleo expandido")
                 continue
                 
             skeleton_binary = skeletonize(gfap_binary)
             
+            # 6.5. PODA (Pruning) Fina Morfológica y Topológica
+            if np.any(skeleton_binary):
+                # Eliminar vóxeles de esqueleto completamente dentro del núcleo original
+                skeleton_binary = skeleton_binary & ~nuclear_mask
+                
+                # Poda Robusta Iterativa por Seguimiento Términal
+                if pruning_min_voxels > 0 and np.any(skeleton_binary):
+                    from scipy.ndimage import convolve
+                    
+                    kernel = np.array([[1, 1, 1],
+                                       [1, 0, 1],
+                                       [1, 1, 1]])
+                    
+                    pruned_skel = skeleton_binary.copy()
+                    
+                    # Vamos a intentar podar de rama en rama en vez de capa por capa,
+                    # para evitar dejar fragmentos intermedios.
+                    # Un bucle iterativo donde en cada iteración podamos ramas
+                    # terminales completas menores o iguales a pruning_min_voxels.
+                    
+                    # Ejecutar múltiples pasadas para limpiar ramas que nacen de ramas podadas
+                    max_passes = 3 
+                    for _pass in range(max_passes):
+                        # Encontrar vecinos
+                        neighbors = convolve(pruned_skel.astype(int), kernel, mode='constant', cval=0)
+                        
+                        # Endpoints: 1 vecino. Aislados: 0 vecinos.
+                        endpoints_coords = np.argwhere(pruned_skel & (neighbors <= 1))
+                        
+                        if len(endpoints_coords) == 0:
+                            break
+                            
+                        # Set para almacenar los píxeles a eliminar en esta pasada
+                        pixels_to_remove = set()
+                        
+                        for ep_y, ep_x in endpoints_coords:
+                            # Ignoramos si el endpoint ya ha sido tragado por el borrado actual 
+                            # (aunque evaluamos en diferido, es bueno tener el set)
+                            branch_path = [(ep_y, ep_x)]
+                            current_y, current_x = ep_y, ep_x
+                            
+                            # Rastrear de vuelta la rama
+                            is_short_branch = True
+                            for step in range(pruning_min_voxels - 1): # -1 porque el endpoint es el step 1
+                                # Buscar el siguiente píxel de esqueleto en el vecindario de 3x3
+                                local_skel = pruned_skel[max(0, current_y-1):current_y+2, max(0, current_x-1):current_x+2]
+                                local_y_offset = min(1, current_y)
+                                local_x_offset = min(1, current_x)
+                                
+                                # Coordenadas globales de los vecinos activos
+                                active_neighbors = []
+                                for dy in [-1, 0, 1]:
+                                    for dx in [-1, 0, 1]:
+                                        if dy == 0 and dx == 0: continue
+                                        ny, nx = current_y + dy, current_x + dx
+                                        if 0 <= ny < pruned_skel.shape[0] and 0 <= nx < pruned_skel.shape[1]:
+                                            if pruned_skel[ny, nx] and (ny, nx) not in branch_path:
+                                                active_neighbors.append((ny, nx))
+                                                
+                                # Si hay más de 1 vecino activo que no está en el path, es una bifurcación (Junction)
+                                if len(active_neighbors) > 1:
+                                    # Llegamos al tronco/bifurcación ANTES de superar el umbral -> Es una rama corta.
+                                    break
+                                elif len(active_neighbors) == 1:
+                                    # Avanzamos por la línea de la rama
+                                    current_y, current_x = active_neighbors[0]
+                                    branch_path.append((current_y, current_x))
+                                else:
+                                    # Llegamos a otro extremo/se acabó la rama (rama aislada)
+                                    break
+                            else:
+                                # El for terminó normalmente sin break => la rama es MÁS LARGA que el umbral.
+                                # Por lo tanto, NO es una rama corta a podar.
+                                is_short_branch = False
+                                
+                            if is_short_branch:
+                                # Agregar todo el path a la lista de ejecución
+                                for py, px in branch_path:
+                                    pixels_to_remove.add((py, px))
+                                    
+                        # Aplicar borrado en masa de las ramas identificadas
+                        for py, px in pixels_to_remove:
+                            pruned_skel[py, px] = False
+                            
+                    # Limpieza final de islas de sub-vóxeles que pudieran quedar flotando 
+                    # debido a topologías extrañas
+                    from skimage.morphology import remove_small_objects
+                    pruned_skel = remove_small_objects(pruned_skel, min_size=pruning_min_voxels+1, connectivity=2)
+                        
+                    # Reesqueletizar para homogeneizar cualquier imperfección a 1 pixel de grosor
+                    skeleton_binary = skeletonize(pruned_skel)
+            
             if not np.any(skeleton_binary):
-                print(f"  Astrocito {label}: sin esqueleto GFAP")
+                print(f"  Astrocito {label}: esqueleto vacío post-poda")
                 continue
             
             # Convertir a SKAN Skeleton

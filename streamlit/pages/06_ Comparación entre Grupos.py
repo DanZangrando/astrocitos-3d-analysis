@@ -7,6 +7,8 @@ import tifffile
 from scipy import stats
 import pingouin as pg
 import streamlit as st
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from ui.sidebar import render_sidebar
 from ui.plots import GROUP_SCALE, PALETTE, boxplot_with_ticks, apply_theme
 
@@ -290,10 +292,26 @@ st.markdown("---")
 METRIC_OPTIONS = {
     # Sholl
     'critical_radius_um': ("Sholl: Radio Crítico", "µm"),
-    # Topología
+    'peak_intersections': ("Sholl: Pico Máximo de Intersecciones", "count"),
+    
+    # Topología Básica
     'total_branch_length_um': ("Longitud Total Esqueleto", "µm"),
-    'ramification_index': ("Índice de Ramificación (ramas/junctions)", "ratio"),
     'n_endpoints': ("Número de Terminaciones", "count"),
+    'n_branches': ("Número Total de Ramas", "count"),
+    'n_junctions': ("Número de Nodos/Bifurcaciones", "count"),
+    
+    # Análisis de Longitud de Ramas
+    'mean_branch_length_um': ("Longitud Media de Rama", "µm"),
+    'branch_length_std_um': ("Desviación Estándar de Longitud de Rama", "µm"),
+    'branch_length_p75_um': ("Percentil 75 Longitud de Rama", "µm"),
+    
+    # Índices y Tortuosidad
+    'ramification_index': ("Índice de Ramificación (ramas/junctions)", "ratio"),
+    'tortuosity_mean': ("Tortuosidad Media", "ratio"),
+    'tortuosity_std': ("Desviación Estándar de Tortuosidad", "ratio"),
+    
+    # Núcleo
+    'nucleus_volume_um3': ("Volumen Nuclear", "µm³")
 }
 
 # Filtrar opciones basadas en las columnas que realmente existen
@@ -426,76 +444,68 @@ else:
     chart_sholl = (band + line).properties(height=400)
     st.altair_chart(chart_sholl, use_container_width=True)
     
-    # 3. Estadística (Mixed ANOVA)
-    st.markdown("**Análisis Estadístico (ANOVA Mixto)**")
-    st.caption("Factor Entre-Sujetos: Grupo | Factor Intra-Sujetos: Radio | Sujeto: Preparado")
+    # 3. Estadística (Área Bajo la Curva - AUC)
+    st.markdown("**Análisis Estadístico (Área Bajo la Curva - AUC)**")
     
-    try:
-        # Verificar requisitos de datos para ANOVA
-        # Necesitamos que todos los sujetos tengan datos en los mismos radios (balanceado idealmente)
-        # O al menos suficientes datos. Pingouin maneja datos desbalanceados, pero hay límites.
+    # Calcular la integral (AUC) para cada preparado
+    def compute_auc(group_df):
+        x = group_df['radius_um'].values
+        y = group_df['intersections'].values
+        # Ordenar por radio para integrar correctamente
+        sort_idx = np.argsort(x)
+        return np.trapz(y[sort_idx], x[sort_idx])
+
+    # Aplicar cálculo de AUC
+    auc_records = []
+    for (group, prep), df_group in df_sholl_prep.groupby(['group', 'prepared']):
+        auc = compute_auc(df_group)
+        auc_records.append({'group': group, 'prepared': prep, 'sholl_auc': auc})
         
-        n_groups = df_sholl_prep['group'].nunique()
-        n_preps = df_sholl_prep['prepared'].nunique()
-        
-        if n_groups < 2 or n_preps < 4:
-            st.warning("⚠️ Insuficientes datos para calcular ANOVA (se requieren al menos 2 grupos y múltiples preparados).")
-        else:
-            with st.spinner("Calculando ANOVA Mixto..."):
-                # Ejecutar ANOVA Mixto
-                aov = pg.mixed_anova(
-                    data=df_sholl_prep, 
-                    dv='intersections', 
-                    within='radius_um', 
-                    between='group', 
-                    subject='prepared'
-                )
+    df_auc = pd.DataFrame(auc_records)
+
+    col_auc_plot, col_auc_stats = st.columns([1, 1])
+    
+    with col_auc_plot:
+        # Gráfico de Boxplot del AUC
+        st.markdown("**Distribución del AUC por Grupo**")
+        chart_auc = boxplot_with_ticks(df_auc, 'sholl_auc', 'group', title_x="Área Bajo la Curva (AUC)")
+        st.altair_chart(chart_auc, use_container_width=True)
+
+    with col_auc_stats:
+        # Test estadístico del AUC
+        st.markdown("**Test sobre el AUC Total**")
+        try:
+            a_auc = df_auc.loc[df_auc['group'] == 'CTL', 'sholl_auc'].dropna().to_numpy()
+            b_auc = df_auc.loc[df_auc['group'] == 'Hipoxia', 'sholl_auc'].dropna().to_numpy()
+            
+            if a_auc.size > 0 and b_auc.size > 0:
+                test_auc = run_comparison_test(a_auc, b_auc)
                 
-                # Formatear tabla para mostrar
-                st.dataframe(
-                    aov.round(4),
-                    use_container_width=True,
-                    column_config={
-                        "Source": "Fuente de Variación",
-                        "SS": "Suma Cuadrados",
-                        "DF1": "GL1",
-                        "DF2": "GL2",
-                        "MS": "Cuad. Medio",
-                        "F": "F",
-                        "p-unc": "P-valor",
-                        "np2": "Eta² parcial"
-                    }
-                )
-                
-                # Interpretación automática
-                p_interaction = aov.loc[aov['Source'] == 'Interaction', 'p-unc'].values[0]
-                p_group = aov.loc[aov['Source'] == 'group', 'p-unc'].values[0]
-                
-                res_str = ""
-                if p_interaction < 0.05:
-                    res_str += f"🔴 **Interacción Significativa (p={p_interaction:.3f}):** El perfil de ramificación difiere significativamente entre grupos a lo largo del radio."
+                if test_auc.get('message') and "No hay suficientes datos" in test_auc['message']:
+                     st.warning(test_auc['message'])
+                elif pd.isna(test_auc['p_value']):
+                     st.error("No se pudo calcular el test sobre AUC.")
                 else:
-                    res_str += f"⚪ **Interacción No Significativa (p={p_interaction:.3f}):** Los perfiles tienen formas similares."
+                    st.metric("Test Usado", test_auc['test_name'])
+                    st.metric("Estadístico", f"{test_auc['stat_label']}={test_auc['stat']:.3f}")
                     
-                if p_group < 0.05:
-                    res_str += f" | 🟠 **Efecto de Grupo Significativo (p={p_group:.3f}):** Existe una diferencia global en la complejidad."
-                
-                st.info(res_str)
-                
-                with st.expander("📖 ¿Cómo leer esta tabla?"):
-                    st.markdown("""
-                    **Fuentes de Variación (Source):**
-                    *   **group**: ¿Hay diferencias totales entre CTL y Hipoxia? (e.g. uno tiene más ramas en general).
-                    *   **radius_um**: Efecto de la distancia (siempre significativo en Sholl).
-                    *   **Interaction**: ¿Cambia la *forma* de la curva? (CRÍTICO: Si es significativo, los grupos tienen arquitecturas diferentes, no solo más/menos ramas).
+                    p_val_auc = test_auc['p_value']
+                    if p_val_auc < 0.001:
+                        p_display = "p < 0.001 *** 🔴"
+                    elif p_val_auc < 0.01:
+                        p_display = f"p = {p_val_auc:.3f} ** 🟠"
+                    elif p_val_auc < 0.05:
+                        p_display = f"p = {p_val_auc:.3f} * 🟡"
+                    else:
+                        p_display = f"p = {p_val_auc:.3f} ns ⚪"
+                        
+                    st.metric("Significancia (p-valor)", p_display)
                     
-                    **Indicadores:**
-                    *   **P-valor**: Probabilidad de error. Si es < 0.05, el efecto es real.
-                    *   **Eta² parcial**: Tamaño del efecto (0.01=pequeño, 0.06=medio, 0.14=grande). Indica qué % de la varianza explica ese factor.
-                    """)
-                
-    except Exception as e:
-        st.error(f"No se pudo calcular ANOVA: {e}")
+                    st.info(f"*(N(CTL)={test_auc['n_a']}, N(Hip)={test_auc['n_b']} preparados)*")
+            else:
+                st.caption("No hay suficientes datos por preparado para comparar AUC.")
+        except Exception as e:
+            st.error(f"Error procesando estadística AUC: {e}")
         st.caption("Verificá que los radios sean consistentes entre preparados.")
 
 st.markdown("---")
@@ -536,3 +546,94 @@ with col2:
         }
     )
     _download_df_button(df_stats, "metricas_por_preparado", "⬇️ Descargar CSV (por preparado)")
+
+st.markdown("---")
+st.markdown("### 🧠 Análisis de Componentes Principales (PCA)")
+
+st.markdown("""
+El PCA permite visualizar si el conjunto global de métricas morfológicas y topológicas es suficiente para 
+segregar los astrocitos de **Control** versus los de **Hipoxia** en el plano de máxima variación.
+""")
+
+pca_data_source = st.radio(
+    "Seleccioná la fuente de datos para el PCA:",
+    options=["Por Preparado (Mediana)", "Por Célula (Individual)"],
+    index=0,
+    horizontal=True,
+    help="Por preparado evita la pseudoreplicación y muestra la tendencia de cada individuo. Por célula muestra la heterogeneidad de toda la población."
+)
+
+df_pca_source = df_stats if pca_data_source == "Por Preparado (Mediana)" else df_plot
+
+# Filtrar solo columnas numéricas que sean métricas (excluyendo IDs como label)
+pca_features = [col for col in df_pca_source.select_dtypes(include=['float64', 'int64']).columns 
+               if col not in ['label', 'prepared', 'group'] and not col.startswith('Unnamed')]
+
+if len(pca_features) < 2:
+    st.warning("No hay suficientes variables numéricas para realizar un PCA.")
+else:
+    # Eliminar filas con NaNs en las features seleccionadas
+    df_pca_clean = df_pca_source.dropna(subset=pca_features).copy()
+    
+    if df_pca_clean.empty or len(df_pca_clean) < 3:
+        st.warning("No hay suficientes datos válidos (sin NaNs) para realizar el PCA.")
+    else:
+        # Pre-procesamiento: Escalar datos (Z-score)
+        X = df_pca_clean[pca_features].values
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # PCA
+        pca = PCA(n_components=2)
+        components = pca.fit_transform(X_scaled)
+        
+        # Varianza explicada
+        var_ratio = pca.explained_variance_ratio_ * 100
+        
+        df_pca_clean['PC1'] = components[:, 0]
+        df_pca_clean['PC2'] = components[:, 1]
+        
+        # Visualización Scatter PCA
+        st.markdown("**Proyección PCA (PC1 vs PC2)**")
+        
+        # Tooltip interactivo
+        tooltip_cols = ['group', 'prepared']
+        if 'label' in df_pca_clean.columns and pca_data_source == "Por Célula (Individual)":
+            tooltip_cols.append('label')
+            
+        scatter = alt.Chart(df_pca_clean).mark_circle(size=60, opacity=0.8).encode(
+            x=alt.X('PC1:Q', title=f'PC1 ({var_ratio[0]:.1f}%)'),
+            y=alt.Y('PC2:Q', title=f'PC2 ({var_ratio[1]:.1f}%)'),
+            color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c'])),
+            tooltip=tooltip_cols
+        ).interactive().properties(height=400)
+        
+        st.altair_chart(scatter, use_container_width=True)
+        
+        # Visualización Factor Loadings
+        with st.expander("🔍 Ver contribución de las variables originales (Loadings)"):
+            st.markdown("Muestra qué variables empujan a las células hacia valores positivos o negativos en cada Componente Principal.")
+            
+            # Cargar loadings
+            loadings = pca.components_.T
+            df_loadings = pd.DataFrame(loadings, columns=['PC1', 'PC2'], index=pca_features)
+            
+            col_l1, col_l2 = st.columns(2)
+            
+            df_loadings_pc1 = df_loadings.reset_index().rename(columns={'index':'Métrica'}).sort_values('PC1', ascending=False)
+            chart_pc1 = alt.Chart(df_loadings_pc1).mark_bar().encode(
+                y=alt.Y('Métrica:N', sort='-x', title=None),
+                x=alt.X('PC1:Q', title='Peso en PC1'),
+                color=alt.condition(alt.datum.PC1 > 0, alt.value("steelblue"), alt.value("orange"))
+            ).properties(title="Contribución a PC1")
+            
+            df_loadings_pc2 = df_loadings.reset_index().rename(columns={'index':'Métrica'}).sort_values('PC2', ascending=False)
+            chart_pc2 = alt.Chart(df_loadings_pc2).mark_bar().encode(
+                y=alt.Y('Métrica:N', sort='-x', title=None),
+                x=alt.X('PC2:Q', title='Peso en PC2'),
+                color=alt.condition(alt.datum.PC2 > 0, alt.value("steelblue"), alt.value("orange"))
+            ).properties(title="Contribución a PC2")
+            
+            col_l1.altair_chart(chart_pc1, use_container_width=True)
+            col_l2.altair_chart(chart_pc2, use_container_width=True)
+
