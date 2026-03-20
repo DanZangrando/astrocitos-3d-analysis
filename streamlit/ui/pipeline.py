@@ -186,11 +186,14 @@ def _calculate_background_stats(channel: np.ndarray, otsu_mask: np.ndarray) -> T
     bg_std = float(np.std(background_voxels))
     return bg_mean, (bg_std if bg_std > 1e-6 else 1.0) 
 
-def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, se, gfap_decision_thr, voxel_vol_um3):
+def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, se, gfap_decision_thr, voxel_vol_um3, 
+                            border_margin_um=0.0, spacing_yx=(0.3, 0.3), img_shape_yx=(0, 0)):
     """
     Función worker para procesar un solo núcleo (usada por ProcessPoolExecutor).
     
-    Filtrado basado únicamente en la intensidad de GFAP en el shell perinuclear.
+    Filtrado basado en:
+    1. Intensidad de GFAP en el shell perinuclear.
+    2. Distancia a los bordes de la imagen (XY) para asegurar Sholl completo.
     
     ESFERICIDAD: Se calcula en 2D a partir de la proyección MIP del núcleo 3D.
     Usa la fórmula de circularidad: 4π * area / perimeter²
@@ -202,12 +205,26 @@ def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, se, gfa
     shell_mask = dilated_mask & ~nucleus_mask
     
     shell_gfap_intensity = 0.0
-    
     if np.any(shell_mask):
         shell_gfap_intensity = float(gfap_channel[shell_mask].mean())
+
+    # --- FILTRADO POR BORDE (Sholl Safety) ---
+    label = nucleus_props.label
+    centroid = nucleus_props.centroid # (z, y, x)
+    cy, cx = centroid[1], centroid[2]
+    H, W = img_shape_yx
+    dy, dx = spacing_yx
     
-    # Decisión basada SOLO en GFAP
-    is_astrocyte = shell_gfap_intensity > gfap_decision_thr
+    dist_y = min(cy, H - cy) * dy
+    dist_x = min(cx, W - cx) * dx
+    min_dist_border = min(dist_y, dist_x)
+    
+    is_near_border = False
+    if border_margin_um > 0:
+        is_near_border = min_dist_border < border_margin_um
+        
+    # Decisión basada en GFAP y BORDE
+    is_astrocyte = (shell_gfap_intensity > gfap_decision_thr) and not is_near_border
     
     volume_vox = nucleus_props.area
     volume_um3 = float(volume_vox) * voxel_vol_um3
@@ -236,6 +253,8 @@ def _process_nucleus_filter(nucleus_props, cellpose_masks, gfap_channel, se, gfa
         "nucleus_volume_um3": volume_um3,
         "nucleus_sphericity": sphericity_2d,  # Circularidad 2D
         "shell_gfap_mean": shell_gfap_intensity,
+        "dist_to_border_um": min_dist_border,
+        "is_near_border": is_near_border,
         "is_astrocyte_candidate": is_astrocyte
     }
     
@@ -275,9 +294,13 @@ def run_filter_and_save(
     gfap_bg_mean, gfap_bg_std = _calculate_background_stats(gfap_channel, otsu_mask)
     
     gfap_decision_thr = gfap_bg_mean + (gfap_std_thr * gfap_bg_std)
+    
+    border_margin_um = float(cal.get("BORDER_FILTER_UM", 0.0))
 
-    print(f"--- Filtrado Relativo (Solo GFAP) ---")
+    print(f"--- Filtrado Relativo (GFAP + Borde) ---")
     print(f"GFAP Fondo: {gfap_bg_mean:.2f} ± {gfap_bg_std:.2f}. Umbral Decisión: > {gfap_decision_thr:.2f}")
+    if border_margin_um > 0:
+        print(f"Filtro de Borde habilitado: {border_margin_um:.1f} µm de margen.")
 
     nuclei_props = regionprops(cellpose_masks)
     astrocyte_labels = []
@@ -289,7 +312,10 @@ def run_filter_and_save(
         gfap_channel=gfap_channel,
         se=se,
         gfap_decision_thr=gfap_decision_thr,
-        voxel_vol_um3=voxel_vol_um3
+        voxel_vol_um3=voxel_vol_um3,
+        border_margin_um=border_margin_um,
+        spacing_yx=(y_um, x_um),
+        img_shape_yx=cellpose_masks.shape[1:]
     )
     
     with ProcessPoolExecutor() as executor:

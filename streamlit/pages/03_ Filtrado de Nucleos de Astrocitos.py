@@ -129,6 +129,15 @@ with fcol2:
 st.markdown("### Filtro por tamaño (volumen físico)")
 min_volume_um3 = st.number_input("Volumen mínimo (µm³)", value=int(glob_calib.get("MIN_VOLUME_UM3", 75)), min_value=0, step=1)
 
+st.markdown("### Filtro de Borde (Sholl Safety)")
+st.info("Descarta núcleos demasiado cerca del borde para asegurar un análisis de Sholl completo.")
+# Por defecto usamos el SHOLL_MAX_RADIUS_UM que suele estar en Paso 4
+sholl_max_default = float(glob_calib.get("SHOLL_MAX_RADIUS_UM", 40.0))
+border_filter_um = st.number_input("Margen de seguridad del borde (µm)", 
+                                   value=float(glob_calib.get("BORDER_FILTER_UM", sholl_max_default)), 
+                                   min_value=0.0, step=1.0,
+                                   help="Se descartarán núcleos cuyo centroide esté a menos de esta distancia de los bordes XY.")
+
 save_experiment_params = st.button("💾 Guardar parámetros del experimento (global)")
 if save_experiment_params:
     glob_calib.update({
@@ -136,6 +145,7 @@ if save_experiment_params:
         "SHELL_RADIUS_UM": float(shell_radius_um),
         "GFAP_STD_DEV_THRESHOLD": float(gfap_std_thr),
         "MIN_VOLUME_UM3": int(min_volume_um3),
+        "BORDER_FILTER_UM": float(border_filter_um),
     })
     _save_global_calibration(glob_calib)
     st.success(f"Parámetros del experimento guardados en {calib_path.relative_to(root)}")
@@ -170,6 +180,7 @@ if run_filter:
             "SHELL_RADIUS_UM": float(shell_radius_um),
             "GFAP_STD_DEV_THRESHOLD": float(gfap_std_thr),
             "MIN_VOLUME_UM3": int(min_volume_um3),
+            "BORDER_FILTER_UM": float(border_filter_um),
         })
         _save_global_calibration(glob_calib)
         st.info("Parámetros de UI guardados en calibration.json")
@@ -181,7 +192,7 @@ if run_filter:
             cellpose_masks, gfap_channel, otsu_mask = data
             
             # 3. Ejecutar SOLO el Paso 03 (Filtrado)
-            with st.spinner("Ejecutando Paso 03 (Filtrado relativo)..."):
+            with st.spinner("Ejecutando Paso 03 (Filtrado relativo + Borde)..."):
                 gfap_filtered_mask, df_metrics = pipeline.run_filter_and_save(
                     cellpose_masks, gfap_channel, 
                     otsu_mask, glob_calib, out_dir
@@ -257,7 +268,7 @@ def render_metrics_section():
 
     mcol1, mcol2, mcol3 = st.columns(3)
     mcol1.metric("Núcleos (Cellpose)", n_cellpose)
-    mcol2.metric("Candidatos (GFAP)", n_gfap, delta=f"{ret_gfap:.1f}% retenidos")
+    mcol2.metric("Candidatos (GFAP+Borde)", n_gfap, delta=f"{ret_gfap:.1f}% retenidos")
     mcol3.metric("Astrocitos (Tamaño)", n_final, delta=f"−{drop_final}" if drop_final > 0 else None)
 
     chart_df = pd.DataFrame({

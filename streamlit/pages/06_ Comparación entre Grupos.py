@@ -10,7 +10,7 @@ import streamlit as st
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from ui.sidebar import render_sidebar
-from ui.plots import GROUP_SCALE, PALETTE, boxplot_with_ticks, apply_theme
+from ui.plots import GROUP_SCALE, PALETTE, boxplot_with_ticks, boxplot_vertical, apply_theme
 
 # Raíz del repo
 ROOT = Path(__file__).resolve().parents[2]
@@ -343,8 +343,32 @@ if selected_metric in df_stats.columns:
         st.warning(f"⚠️ Pocos datos disponibles para esta métrica. Se recomienda re-ejecutar el paso 04 (Sholl) o 05 (topología) en más preparados.")
 
 # --- 1. Gráfico de Distribución (usando df_plot) ---
-st.markdown("**Distribución por Célula (para visualización)**")
-chart = boxplot_with_ticks(df_plot.dropna(subset=[selected_metric]), selected_metric, 'group', title_x=metric_label)
+col_plot1, col_plot2 = st.columns(2)
+with col_plot1:
+    distribution_plot_type = st.radio(
+        "Tipo de gráfico de distribución:",
+        options=["Boxplot Vertical (Recomendado)", "Distribución Horizontal (Barcode)"],
+        index=0,
+        horizontal=True
+    )
+with col_plot2:
+    data_source_level = st.radio(
+        "Nivel de análisis para el gráfico:",
+        options=["Por Preparado (Mediana)", "Por Célula (Individual)"],
+        index=0,
+        horizontal=True,
+        help="Por preparado muestra un punto por animal (mediana). Por célula muestra todas las células medidas."
+    )
+
+df_to_plot = df_stats if data_source_level == "Por Preparado (Mediana)" else df_plot
+n_points = df_to_plot[selected_metric].dropna().shape[0]
+st.markdown(f"**Distribución {data_source_level} (N={n_points} puntos)**")
+
+if distribution_plot_type == "Boxplot Vertical (Recomendado)":
+    chart = boxplot_vertical(df_to_plot.dropna(subset=[selected_metric]), selected_metric, 'group', title_y=metric_label)
+else:
+    chart = boxplot_with_ticks(df_to_plot.dropna(subset=[selected_metric]), selected_metric, 'group', title_x=metric_label)
+
 st.altair_chart(chart, use_container_width=True)
 
 # --- 2. Test Estadístico (usando df_stats) ---
@@ -468,7 +492,7 @@ else:
     with col_auc_plot:
         # Gráfico de Boxplot del AUC
         st.markdown("**Distribución del AUC por Grupo**")
-        chart_auc = boxplot_with_ticks(df_auc, 'sholl_auc', 'group', title_x="Área Bajo la Curva (AUC)")
+        chart_auc = boxplot_vertical(df_auc, 'sholl_auc', 'group', title_y="Área Bajo la Curva (AUC)")
         st.altair_chart(chart_auc, use_container_width=True)
 
     with col_auc_stats:
@@ -565,21 +589,56 @@ pca_data_source = st.radio(
 
 df_pca_source = df_stats if pca_data_source == "Por Preparado (Mediana)" else df_plot
 
-# Filtrar solo columnas numéricas que sean métricas (excluyendo IDs como label)
-pca_features = [col for col in df_pca_source.select_dtypes(include=['float64', 'int64']).columns 
-               if col not in ['label', 'prepared', 'group'] and not col.startswith('Unnamed')]
-
-if len(pca_features) < 2:
-    st.warning("No hay suficientes variables numéricas para realizar un PCA.")
+# --- Selección Curada de Variables para PCA ---
+with st.expander("🛠️ Configuración de Variables PCA", expanded=True):
+    st.markdown("""
+    Seleccioná las métricas que querés incluir en el análisis. 
+    **Nota:** Incluir demasiadas variables redundantes (como contar ramas y nodos a la vez) puede sesgar el PCA.
+    """)
+    
+    # Diccionario de descripciones para ayudar al usuario
+    FEATURE_INFO = {
+        'total_branch_length_um': "Longitud total de todos los procesos (Tamaño)",
+        'n_endpoints': "Número de terminaciones (Complejidad de ramificación)",
+        'mean_branch_length_um': "Promedio de longitud de ramas individuales (Escala)",
+        'tortuosity_mean': "Sinuosidad promedio de las ramas (Geometría)",
+        'critical_radius_um': "Radio donde ocurre el pico de intersecciones (Extensión Sholl)",
+        'peak_intersections': "Máximo número de intersecciones (Densidad Sholl)",
+        'auc': "Área bajo la curva Sholl (Complejidad acumulada)",
+        'nucleus_volume_um3': "Volumen del núcleo (Tamaño del soma)",
+        'n_branches': "Número total de segmentos (Altamente redundante con terminaciones)",
+        'n_junctions': "Número de bifurcaciones (Altamente redundante con terminaciones)",
+        'ramification_index': "Ratio ramas/nodos (Poco discriminativo en árboles binarios)"
+    }
+    
+    all_numeric = [col for col in df_pca_source.select_dtypes(include=['float64', 'int64']).columns 
+                  if col not in ['label', 'prepared', 'group'] and not col.startswith('Unnamed')]
+    
+    default_curated = [
+        'total_branch_length_um', 'n_endpoints', 'mean_branch_length_um', 
+        'tortuosity_mean', 'critical_radius_um', 'peak_intersections', 'nucleus_volume_um3'
+    ]
+    # Filtrar solo las que existen en el dataframe
+    default_curated = [c for c in default_curated if c in all_numeric]
+    
+    selected_pca_features = st.multiselect(
+        "Variables a incluir:",
+        options=all_numeric,
+        default=default_curated,
+        format_func=lambda x: f"{x} ({FEATURE_INFO.get(x, 'Métrica')})"
+    )
+    
+if len(selected_pca_features) < 2:
+    st.warning("Seleccioná al menos 2 variables para realizar el PCA.")
 else:
     # Eliminar filas con NaNs en las features seleccionadas
-    df_pca_clean = df_pca_source.dropna(subset=pca_features).copy()
+    df_pca_clean = df_pca_source.dropna(subset=selected_pca_features).copy()
     
     if df_pca_clean.empty or len(df_pca_clean) < 3:
-        st.warning("No hay suficientes datos válidos (sin NaNs) para realizar el PCA.")
+        st.warning("No hay suficientes datos válidos (sin NaNs) para las variables seleccionadas.")
     else:
         # Pre-procesamiento: Escalar datos (Z-score)
-        X = df_pca_clean[pca_features].values
+        X = df_pca_clean[selected_pca_features].values
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
@@ -593,7 +652,7 @@ else:
         df_pca_clean['PC1'] = components[:, 0]
         df_pca_clean['PC2'] = components[:, 1]
         
-        # Visualización Scatter PCA
+        # --- Visualización Scatter PCA ---
         st.markdown("**Proyección PCA (PC1 vs PC2)**")
         
         # Tooltip interactivo
@@ -601,14 +660,147 @@ else:
         if 'label' in df_pca_clean.columns and pca_data_source == "Por Célula (Individual)":
             tooltip_cols.append('label')
             
-        scatter = alt.Chart(df_pca_clean).mark_circle(size=60, opacity=0.8).encode(
+        # --- Análisis Estadístico Adicional ---
+        df_centroids = df_pca_clean.groupby('group')[['PC1', 'PC2']].mean().reset_index()
+        
+        # Test Multivariado (Hotelling T2) sobre PC1 y PC2
+        ctl_pc = df_pca_clean[df_pca_clean['group'] == 'CTL'][['PC1', 'PC2']]
+        hip_pc = df_pca_clean[df_pca_clean['group'] == 'Hipoxia'][['PC1', 'PC2']]
+        
+        
+        has_stats = False
+        stat_error = None
+        if len(ctl_pc) >= 3 and len(hip_pc) >= 3:
+            try:
+                res_mv = pg.multivariate_ttest(ctl_pc, hip_pc)
+                # OJO: Pingouin usa 'pval' como nombre de columna
+                p_mv = res_mv['pval'].values[0]
+                t2_mv = res_mv['T2'].values[0]
+                has_stats = True
+            except Exception as e:
+                stat_error = str(e)
+        else:
+            stat_error = f"Insuficientes datos (CTL: {len(ctl_pc)}, Hipoxia: {len(hip_pc)}). Se necesitan al menos 3 por grupo."
+        
+        # Calcular Elipses de Confianza (95%)
+        def get_ellipse_df(data, group_name):
+            if len(data) < 5: return pd.DataFrame()
+            try:
+                mu = data.mean(axis=0).values
+                cov = data.cov().values
+                if np.any(np.isnan(cov)) or np.any(np.isinf(cov)): return pd.DataFrame()
+                
+                vals, vecs = np.linalg.eigh(cov)
+                vals = np.maximum(vals, 1e-10) # Estabilidad numérica
+                order = vals.argsort()[::-1]
+                vals, vecs = vals[order], vecs[:, order]
+                
+                # 95% Confidence interval for 2D normal distribution (sqrt(chi2.ppf(0.95, 2)) approx 2.447)
+                n_std = 2.447 
+                
+                t = np.linspace(0, 2*np.pi, 100)
+                a, b = n_std * np.sqrt(vals[0]), n_std * np.sqrt(vals[1])
+                ellipse_x = mu[0] + a * np.cos(t) * vecs[0, 0] + b * np.sin(t) * vecs[0, 1]
+                ellipse_y = mu[1] + a * np.cos(t) * vecs[1, 0] + b * np.sin(t) * vecs[1, 1]
+                
+                # Crear DataFrame con índice de orden explícito
+                df_e = pd.DataFrame({
+                    'PC1': ellipse_x, 
+                    'PC2': ellipse_y, 
+                    'group': group_name,
+                    'order_idx': np.arange(len(ellipse_x))
+                })
+                # Cerrar el loop agregando el primer punto al final
+                first_point = df_e.iloc[[0]].copy()
+                first_point['order_idx'] = len(ellipse_x)
+                return pd.concat([df_e, first_point], ignore_index=True)
+            except:
+                return pd.DataFrame()
+
+        df_ellipses = pd.concat([
+            get_ellipse_df(ctl_pc, 'CTL'),
+            get_ellipse_df(hip_pc, 'Hipoxia')
+        ], ignore_index=True)
+
+        # --- Visualización Scatter PCA Mejorada ---
+        st.markdown("**Proyección PCA con Centroides y Elipses de Confianza (95%)**")
+        
+        # Base chart
+        base = alt.Chart(df_pca_clean).encode(
             x=alt.X('PC1:Q', title=f'PC1 ({var_ratio[0]:.1f}%)'),
             y=alt.Y('PC2:Q', title=f'PC2 ({var_ratio[1]:.1f}%)'),
-            color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c'])),
+            color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c']))
+        )
+
+        # Puntos individuales discretos
+        points = base.mark_circle(size=30, opacity=0.3).encode(
             tooltip=tooltip_cols
-        ).interactive().properties(height=400)
-        
-        st.altair_chart(scatter, use_container_width=True)
+        )
+
+        # Elipses como contornos limpios (Sin líneas internas fantasma)
+        ellipses = alt.Chart(df_ellipses).mark_line(
+            strokeWidth=2, opacity=0.9
+        ).encode(
+            x='PC1:Q', y='PC2:Q', 
+            color='group:N',
+            detail='group:N', # Separa líneas por grupo
+            order='order_idx:Q' # FUERZA el orden de conexión para evitar zigzags
+        )
+
+        # Centroides destacados
+        centroids = alt.Chart(df_centroids).mark_point(
+            size=250, filled=False, shape='cross', strokeWidth=3
+        ).encode(
+            x='PC1:Q', y='PC2:Q', color='group:N'
+        )
+
+        final_pca_chart = (points + ellipses + centroids).properties(height=500).interactive()
+        st.altair_chart(final_pca_chart, use_container_width=True)
+
+        # --- Resultados del Test Multivariado (Siempre visible) ---
+        st.markdown("#### Estadística de Segregación de Grupos")
+        if has_stats:
+            c1_pos = df_centroids[df_centroids['group'] == 'CTL'][['PC1', 'PC2']].values[0]
+            c2_pos = df_centroids[df_centroids['group'] == 'Hipoxia'][['PC1', 'PC2']].values[0]
+            dist_c = np.linalg.norm(c1_pos - c2_pos)
+            
+            scol1, scol2, scol3 = st.columns(3)
+            scol1.metric("Distancia entre Centroides", f"{dist_c:.3f}")
+            scol2.metric("Hotelling T²", f"{t2_mv:.2f}")
+            
+            sig_icon = "🔴" if p_mv < 0.05 else "⚪"
+            p_text = f"p < 0.001" if p_mv < 0.001 else f"p = {p_mv:.3f}"
+            scol3.metric("P-valor (Multivariado)", f"{p_text} {sig_icon}")
+            
+            if p_mv < 0.05:
+                st.success(f"✅ **Diferencia Significativa:** Existe una segregación global sólida entre grupos en el espacio PCA (p={p_mv:.3g}).")
+            else:
+                st.info(f"ℹ️ **Sin Diferencia Significativa:** No hay evidencia estadística de segregación clara (p={p_mv:.3g}).")
+        else:
+            st.warning(f"⚠️ **No se pudo realizar el Test de Hotelling:** {stat_error}")
+            st.caption("Asegúrate de tener suficientes datos cargados y procesados para ambos grupos.")
+
+        # --- Guía de Interpretación ---
+        with st.expander("❓ ¿Cómo leer este análisis?", expanded=False):
+            st.markdown("""
+            ### Guía rápida de interpretación del PCA
+            
+            1. **¿Qué son los ejes PC1 y PC2?**
+               Son las variaciones morfológicas más importantes. El porcentaje (%) indica cuánta variabilidad total capturan.
+            
+            2. **Los Puntos**: Cada punto es un preparado (o célula). Puntos cercanos tienen morfologías similares.
+            
+            3. **Los Centroides (Cruces ✚)**: Representan el "promedio" de cada grupo. 
+               - **Distancia**: Mayor distancia indica mayor diferencia morfológica global.
+            
+            4. **Las Elipses**: Área de confianza del 95%.
+               - **Separadas**: Grupos morfológicamente distintos.
+               - **Solapadas**: Gran variabilidad compartida entre grupos.
+            
+            5. **Test de Hotelling (Multivariado)**:
+               - Es el test estadístico para comparar los centroides considerando juntas PC1 y PC2.
+               - **p < 0.05 (🔴)**: La separación es estadísticamente real.
+            """)
         
         # Visualización Factor Loadings
         with st.expander("🔍 Ver contribución de las variables originales (Loadings)"):
@@ -616,7 +808,7 @@ else:
             
             # Cargar loadings
             loadings = pca.components_.T
-            df_loadings = pd.DataFrame(loadings, columns=['PC1', 'PC2'], index=pca_features)
+            df_loadings = pd.DataFrame(loadings, columns=['PC1', 'PC2'], index=selected_pca_features)
             
             col_l1, col_l2 = st.columns(2)
             

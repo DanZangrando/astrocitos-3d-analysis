@@ -37,6 +37,7 @@ def apply_theme(st_module) -> None:
 
 
 def boxplot_with_ticks(df, x_col: str, color_col: str, title_x: str = ""):
+    """Versión horizontal (barcode) actual."""
     base = alt.Chart(df)
     box = base.mark_boxplot(outliers=True).encode(
         x=alt.X(f"{x_col}:Q", title=title_x),
@@ -49,6 +50,34 @@ def boxplot_with_ticks(df, x_col: str, color_col: str, title_x: str = ""):
         color=alt.Color(f"{color_col}:N", scale=GROUP_SCALE, legend=None),
     )
     return box + ticks
+
+
+def boxplot_vertical(df, y_col: str, x_col: str, title_y: str = "", width: int = 180):
+    """
+    Crea un boxplot vertical con puntos individuales (con jitter) para publicaciones.
+    """
+    # Base compartida
+    base = alt.Chart(df).encode(
+        x=alt.X(f"{x_col}:N", title=None, axis=alt.Axis(labelAngle=0)),
+        color=alt.Color(f"{x_col}:N", scale=GROUP_SCALE, legend=None)
+    )
+    
+    # Caja (Boxplot) - extent 'min-max' para mostrar todo el rango si no se quieren outliers separados
+    box = base.mark_boxplot(size=60, opacity=0.8, color='white').encode(
+        y=alt.Y(f"{y_col}:Q", title=title_y, scale=alt.Scale(zero=False)),
+        color=alt.Color(f"{x_col}:N", scale=GROUP_SCALE)
+    )
+    
+    # Puntos con Jitter
+    points = base.mark_circle(size=20, opacity=0.4).encode(
+        y=alt.Y(f"{y_col}:Q"),
+    ).transform_calculate(
+        jitter='(random() - 0.5) * 50'
+    ).encode(
+        xOffset='jitter:Q'
+    )
+    
+    return (box + points).properties(width=width)
 
 
 def violin_density(df, x_col: str, color_col: str, title_x: str = "", height: int = 160):
