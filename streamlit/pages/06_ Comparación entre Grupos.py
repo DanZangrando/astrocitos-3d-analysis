@@ -370,6 +370,7 @@ else:
     chart = boxplot_with_ticks(df_to_plot.dropna(subset=[selected_metric]), selected_metric, 'group', title_x=metric_label)
 
 st.altair_chart(chart, use_container_width=True)
+_download_df_button(df_to_plot.dropna(subset=[selected_metric]), filename_base=f"datos_grafico_{selected_metric}", label="⬇️ Descargar datos de este gráfico (CSV)")
 
 # --- 2. Test Estadístico (usando df_stats) ---
 st.markdown("**Test Estadístico (sobre medianas por preparado)**")
@@ -467,6 +468,7 @@ else:
     
     chart_sholl = (band + line).properties(height=400)
     st.altair_chart(chart_sholl, use_container_width=True)
+    _download_df_button(df_sholl_prep, filename_base="datos_grafico_curvas_sholl", label="⬇️ Descargar datos de este gráfico (CSV)")
     
     # 3. Estadística (Área Bajo la Curva - AUC)
     st.markdown("**Análisis Estadístico (Área Bajo la Curva - AUC)**")
@@ -494,6 +496,7 @@ else:
         st.markdown("**Distribución del AUC por Grupo**")
         chart_auc = boxplot_vertical(df_auc, 'sholl_auc', 'group', title_y="Área Bajo la Curva (AUC)")
         st.altair_chart(chart_auc, use_container_width=True)
+        _download_df_button(df_auc, filename_base="datos_grafico_auc_sholl", label="⬇️ Descargar datos de este gráfico (CSV)")
 
     with col_auc_stats:
         # Test estadístico del AUC
@@ -756,6 +759,7 @@ else:
 
         final_pca_chart = (points + ellipses + centroids).properties(height=500).interactive()
         st.altair_chart(final_pca_chart, use_container_width=True)
+        _download_df_button(df_pca_clean, filename_base="datos_grafico_pca", label="⬇️ Descargar datos de este gráfico (CSV)")
 
         # --- Resultados del Test Multivariado (Siempre visible) ---
         st.markdown("#### Estadística de Segregación de Grupos")
