@@ -660,9 +660,11 @@ else:
         st.markdown("**Proyección PCA (PC1 vs PC2)**")
         
         # Tooltip interactivo
-        tooltip_cols = ['group', 'prepared']
-        if 'label' in df_pca_clean.columns and pca_data_source == "Por Célula (Individual)":
-            tooltip_cols.append('label')
+        tooltip_cols = ['group', 'individual']
+        if pca_data_source == "Por Célula (Individual)":
+            tooltip_cols.append('prepared')
+            if 'label' in df_pca_clean.columns:
+                tooltip_cols.append('label')
             
         # --- Análisis Estadístico Adicional ---
         df_centroids = df_pca_clean.groupby('group')[['PC1', 'PC2']].mean().reset_index()
