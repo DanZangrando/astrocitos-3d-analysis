@@ -51,7 +51,7 @@ def _detect_group(p: Path, root: Path) -> str:
     except Exception:
         rel = str(p).lower()
     if "/hip/" in rel:
-        return "Hipoxia"
+        return "Hypoxia"
     if "/ctl/" in rel:
         return "CTL"
     return "CTL"
@@ -100,7 +100,7 @@ s1.metric("Fracción voxeles Otsu", f"{100*otsu_frac:.1f}%" if isinstance(otsu_f
 s2.metric("Núcleos Cellpose", cp_count if isinstance(cp_count, int) else "—")
 
 def _group_badge_html(group: str) -> str:
-    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    color = {"CTL": "#1f77b4", "Hypoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
 st.markdown(_group_badge_html(group) + f"&nbsp;· Directorio: {out_dir.relative_to(root)}", unsafe_allow_html=True)
 
@@ -109,7 +109,7 @@ with st.expander("Recalcular por ámbito (Batch)", expanded=False):
     scope = st.radio("Ámbito", options=["Grupo", "Todos"], horizontal=True, key="p02_scope")
     scope_group = None
     if scope == "Grupo":
-        scope_group = st.selectbox("Grupo", options=["CTL","Hipoxia"], index=0, key="p02_scope_group")
+        scope_group = st.selectbox("Grupo", options=["CTL","Hypoxia"], index=0, key="p02_scope_group")
     include_otsu = st.checkbox("Incluir Otsu (recalcular desde 01)", value=True, key="p02_inc_otsu")
     if st.button("▶️ Recalcular", key="p02_recalc"):
         start = "01" if include_otsu else "02"

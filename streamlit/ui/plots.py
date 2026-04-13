@@ -3,8 +3,8 @@ from __future__ import annotations
 import altair as alt
 
 # Shared color scale for groups
-PALETTE = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}
-GROUP_SCALE = alt.Scale(domain=["CTL", "Hipoxia"], range=[PALETTE["CTL"], PALETTE["Hipoxia"]])
+PALETTE = {"CTL": "#1f77b4", "Hypoxia": "#d62728"}
+GROUP_SCALE = alt.Scale(domain=["CTL", "Hypoxia"], range=[PALETTE["CTL"], PALETTE["Hypoxia"]])
 
 
 def configure_altair() -> None:
@@ -87,7 +87,7 @@ def violin_density(df, x_col: str, color_col: str, title_x: str = "", height: in
         .mark_area(opacity=0.25)
         .encode(
             x=alt.X(f"{x_col}:Q", title=title_x),
-            y=alt.Y('density:Q', title='densidad'),
+            y=alt.Y('density:Q', title='Density'),
             color=alt.Color(f"{color_col}:N", scale=GROUP_SCALE),
         )
         .properties(height=height)
@@ -100,7 +100,7 @@ def histogram(df, x_col: str, color_col: str, title_x: str, maxbins: int = 30, h
         .mark_bar(opacity=0.45)
         .encode(
             x=alt.X(f"{x_col}:Q", bin=alt.Bin(maxbins=maxbins), title=title_x),
-            y=alt.Y('count():Q', title='conteo'),
+            y=alt.Y('count():Q', title='Count'),
             color=alt.Color(f"{color_col}:N", scale=GROUP_SCALE),
         )
         .properties(height=height)

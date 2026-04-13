@@ -2,7 +2,7 @@ from pathlib import Path
 
 def detect_group(p: Path, root: Path) -> str:
     """
-    Detects the experimental group (CTL or Hipoxia) of a file based on its path.
+    Detects the experimental group (CTL or Hypoxia) of a file based on its path.
     """
     try:
         rel = str(p.relative_to(root)).lower()
@@ -10,7 +10,7 @@ def detect_group(p: Path, root: Path) -> str:
         rel = str(p).lower()
     
     if "/hip/" in rel:
-        return "Hipoxia"
+        return "Hypoxia"
     if "/ctl/" in rel:
         return "CTL"
     

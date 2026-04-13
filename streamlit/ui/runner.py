@@ -29,7 +29,7 @@ def detect_group(p: Path, root: Path) -> str:
     except Exception:
         rel = str(p).lower()
     if "/hip/" in rel:
-        return "Hipoxia"
+        return "Hypoxia"
     return "CTL"
 
 
@@ -192,7 +192,7 @@ def run_scope(
     files = list_raw_images(root)
     if scope == "selected":
         targets = [selected] if selected is not None else []
-    elif scope == "group" and group in {"CTL", "Hipoxia"}:
+    elif scope == "group" and group in {"CTL", "Hypoxia"}:
         targets = [p for p in files if detect_group(p, root) == group]
     else:
         targets = files

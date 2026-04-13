@@ -84,7 +84,7 @@ st.write({
     "output_dir": str(out_dir.relative_to(root)),
 })
 def _group_badge_html(group: str) -> str:
-    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    color = {"CTL": "#1f77b4", "Hypoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
 st.markdown(_group_badge_html(group), unsafe_allow_html=True)
 
@@ -94,7 +94,7 @@ with st.expander("Recalcular por ámbito (Batch)", expanded=False):
     
     scope_group = None
     if scope == "Grupo":
-        scope_group = st.selectbox("Grupo", options=["CTL","Hipoxia"], index=0, key="p03_scope_group")
+        scope_group = st.selectbox("Grupo", options=["CTL","Hypoxia"], index=0, key="p03_scope_group")
         
     if st.button("▶️ Recalcular (desde 03)", key="p03_recalc"):
         cal = _read_global_calibration()

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
 PROC_DIR = ROOT / "data" / "processed"
 
-st.title("Comparación entre Grupos (CTL vs Hipoxia)")
+st.title("Group Comparison (CTL vs Hypoxia)")
 render_sidebar(show_calibration=True)
 apply_theme(st)
 
@@ -34,7 +34,7 @@ def run_comparison_test(a: np.ndarray, b: np.ndarray, alpha: float = 0.05) -> di
     }
     # Manejar casos borde
     if a.size < 3 or b.size < 3:
-        results['message'] = f"No hay suficientes datos (CTL n={a.size}, Hipoxia n={b.size}) para un test robusto."
+        results['message'] = f"No hay suficientes datos (CTL n={a.size}, Hypoxia n={b.size}) para un test robusto."
         return results
     a_var, b_var = np.var(a, ddof=1), np.var(b, ddof=1)
 
@@ -98,15 +98,15 @@ def list_raw_images(raw_dir: Path) -> list[Path]:
     return files
 
 def detect_group_from_path(p: Path) -> str:
-    """Detecta el grupo (CTL o Hipoxia) desde la ruta del archivo."""
-    return 'Hipoxia' if '/hip/' in str(p).replace('\\', '/').lower() else 'CTL'
+    """Detecta el grupo (CTL o Hypoxia) desde la ruta del archivo."""
+    return 'Hypoxia' if '/hip/' in str(p).replace('\\', '/').lower() else 'CTL'
 
 # --- Carga de Datos (REFACTORIZADA) ---
 @st.cache_data(ttl=60) # Cachear por 1 min (reducido para reflejar cambios más rápido)
 def load_all_metrics(raw_dir: Path, proc_dir: Path):
     """
     Carga y fusiona todas las métricas (núcleo, esqueleto, sholl) de todos 
-    los preparados procesados.
+    los individuos procesados.
     """
     files = list_raw_images(raw_dir)
     rows_skel = []
@@ -122,7 +122,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         ps = od / "skeletons" / "summary.csv"
         if ps.exists():
             try:
-                df = pd.read_csv(ps); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
+                df = pd.read_csv(ps); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group; df['individual'] = p.parent.name
                 rows_skel.append(df)
             except Exception: pass
         
@@ -130,7 +130,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         pss = od / "sholl_summary.csv"
         if pss.exists():
             try:
-                df = pd.read_csv(pss); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
+                df = pd.read_csv(pss); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group; df['individual'] = p.parent.name
                 rows_sholl.append(df)
             except Exception: pass
 
@@ -142,6 +142,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
                 df = pd.read_csv(pr, usecols=['label', 'radius_um', 'intersections']) 
                 df['prepared'] = f"{group}-{p.stem}"
                 df['group'] = group
+                df['individual'] = p.parent.name
                 rows_sholl_raw.append(df)
             except Exception: pass
             
@@ -149,7 +150,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         pn = od / "03_nucleus_metrics.csv"
         if pn.exists():
             try:
-                df = pd.read_csv(pn); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group
+                df = pd.read_csv(pn); df['prepared'] = f"{group}-{p.stem}"; df['group'] = group; df['individual'] = p.parent.name
                 rows_nuc.append(df)
             except Exception: pass
 
@@ -171,7 +172,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
         # Agregar Sholl
         if not df_sholl_all.empty:
             df_por_celula = pd.merge(df_por_celula, df_sholl_all, 
-                                     on=['label', 'prepared', 'group'], how='left')
+                                     on=['label', 'prepared', 'group', 'individual'], how='left')
     elif not df_sholl_all.empty:
         # Si no hay skeleton pero sí Sholl, comenzar con Sholl
         df_por_celula = df_sholl_all.copy()
@@ -190,7 +191,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
             if not df_por_celula.empty and 'label' in df_por_celula.columns:
                 # Merge con datos existentes
                 df_por_celula = pd.merge(df_por_celula, df_nuc_astros, 
-                                        on=['label', 'prepared', 'group'], how='left')
+                                        on=['label', 'prepared', 'group', 'individual'], how='left')
             elif df_por_celula.empty:
                 # Si no hay skeleton ni sholl, al menos usar núcleos
                 df_por_celula = df_nuc_astros
@@ -202,7 +203,7 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
     # 1. DataFrame para gráficos (todas las células)
     df_plot = df_por_celula.copy()
     
-    # 2. DataFrame para estadística (mediana por preparado)
+    # 2. DataFrame para estadística (media por individuo para evitar pseudoreplicación)
     cols_to_agg = [
         # Métricas de Sholl
         'critical_radius_um', 'peak_intersections', 'auc',
@@ -223,10 +224,10 @@ def load_all_metrics(raw_dir: Path, proc_dir: Path):
     ]
     valid_cols_to_agg = [col for col in cols_to_agg if col in df_plot.columns]
     
-    if not valid_cols_to_agg or 'prepared' not in df_plot.columns or 'group' not in df_plot.columns:
+    if not valid_cols_to_agg or 'individual' not in df_plot.columns or 'group' not in df_plot.columns:
         return df_plot, pd.DataFrame(), pd.DataFrame() # No hay suficientes datos
 
-    df_stats = df_plot.groupby(['prepared', 'group'])[valid_cols_to_agg].median().reset_index()
+    df_stats = df_plot.groupby(['individual', 'group'])[valid_cols_to_agg].mean().reset_index()
     
     # --- Fusión de Curvas Sholl (Raw) ---
     # Necesitamos cargar los perfiles raw para la gráfica de curvas
@@ -245,40 +246,40 @@ if df_plot is None or df_stats is None:
 
 # --- Estado del Pipeline ---
 st.markdown("### 📊 Estado del Procesamiento")
-total_preps = df_stats['prepared'].nunique()
+total_individuals = df_stats['individual'].nunique()
 
 col_status1, col_status2, col_status3 = st.columns(3)
 
 n_ctl = (df_stats['group'] == 'CTL').sum()
-n_hip = (df_stats['group'] == 'Hipoxia').sum()
+n_hip = (df_stats['group'] == 'Hypoxia').sum()
 
-col_status1.metric("Total Preparados", total_preps)
+col_status1.metric("Total Individuos", total_individuals)
 col_status2.metric("CTL", n_ctl)
-col_status3.metric("Hipoxia", n_hip)
+col_status3.metric("Hypoxia", n_hip)
 
 # Verificar completitud de datos por tipo
 numeric_cols_check = [col for col in df_stats.columns 
-                      if col not in ['prepared', 'group'] and df_stats[col].dtype in ['float64', 'int64']]
+                      if col not in ['individual', 'group'] and df_stats[col].dtype in ['float64', 'int64']]
 
 # Sholl
 sholl_cols = [c for c in numeric_cols_check if 'auc' in c or 'critical_radius' in c or 'peak' in c]
 if sholl_cols:
     n_with_sholl = df_stats[sholl_cols[0]].notna().sum()
-    pct_sholl = (n_with_sholl / total_preps) * 100
+    pct_sholl = (n_with_sholl / total_individuals) * 100
     col_status1.metric("Con datos Sholl", f"{n_with_sholl} ({pct_sholl:.0f}%)")
 
 # Topología
 topo_cols = [c for c in numeric_cols_check if 'branch' in c or 'tortuosity' in c]
 if topo_cols:
     n_with_topo = df_stats[topo_cols[0]].notna().sum()
-    pct_topo = (n_with_topo / total_preps) * 100
+    pct_topo = (n_with_topo / total_individuals) * 100
     col_status2.metric("Con datos topológicos", f"{n_with_topo} ({pct_topo:.0f}%)")
 
 # Núcleo
 nuc_cols = [c for c in numeric_cols_check if 'nucleus' in c]
 if nuc_cols:
     n_with_nuc = df_stats[nuc_cols[0]].notna().sum()
-    pct_nuc = (n_with_nuc / total_preps) * 100
+    pct_nuc = (n_with_nuc / total_individuals) * 100
     col_status3.metric("Con datos nucleares", f"{n_with_nuc} ({pct_nuc:.0f}%)")
 
 # Botón para refrescar datos
@@ -291,27 +292,27 @@ st.markdown("---")
 # --- Definir métricas disponibles para comparar ---
 METRIC_OPTIONS = {
     # Sholl
-    'critical_radius_um': ("Sholl: Radio Crítico", "µm"),
-    'peak_intersections': ("Sholl: Pico Máximo de Intersecciones", "count"),
+    'critical_radius_um': ("Sholl: Critical Radius", "µm"),
+    'peak_intersections': ("Sholl: Peak Max Intersections", "count"),
     
     # Topología Básica
-    'total_branch_length_um': ("Longitud Total Esqueleto", "µm"),
-    'n_endpoints': ("Número de Terminaciones", "count"),
-    'n_branches': ("Número Total de Ramas", "count"),
-    'n_junctions': ("Número de Nodos/Bifurcaciones", "count"),
+    'total_branch_length_um': ("Total Skeleton Length", "µm"),
+    'n_endpoints': ("Number of Endpoints", "count"),
+    'n_branches': ("Total Number of Branches", "count"),
+    'n_junctions': ("Number of Junctions", "count"),
     
     # Análisis de Longitud de Ramas
-    'mean_branch_length_um': ("Longitud Media de Rama", "µm"),
-    'branch_length_std_um': ("Desviación Estándar de Longitud de Rama", "µm"),
-    'branch_length_p75_um': ("Percentil 75 Longitud de Rama", "µm"),
+    'mean_branch_length_um': ("Mean Branch Length", "µm"),
+    'branch_length_std_um': ("Branch Length Std", "µm"),
+    'branch_length_p75_um': ("Branch Length 75th Percentile", "µm"),
     
     # Índices y Tortuosidad
-    'ramification_index': ("Índice de Ramificación (ramas/junctions)", "ratio"),
-    'tortuosity_mean': ("Tortuosidad Media", "ratio"),
-    'tortuosity_std': ("Desviación Estándar de Tortuosidad", "ratio"),
+    'ramification_index': ("Ramification Index (branches/junctions)", "ratio"),
+    'tortuosity_mean': ("Mean Tortuosity", "ratio"),
+    'tortuosity_std': ("Tortuosity Std", "ratio"),
     
     # Núcleo
-    'nucleus_volume_um3': ("Volumen Nuclear", "µm³")
+    'nucleus_volume_um3': ("Nuclear Volume", "µm³")
 }
 
 # Filtrar opciones basadas en las columnas que realmente existen
@@ -331,16 +332,16 @@ st.markdown(f"#### {metric_label}")
 # --- Información de Disponibilidad de Datos ---
 if selected_metric in df_stats.columns:
     n_ctl = df_stats.loc[df_stats['group']=='CTL', selected_metric].dropna().shape[0]
-    n_hip = df_stats.loc[df_stats['group']=='Hipoxia', selected_metric].dropna().shape[0]
-    total_preps = n_ctl + n_hip
+    n_hip = df_stats.loc[df_stats['group']=='Hypoxia', selected_metric].dropna().shape[0]
+    total_individuals = n_ctl + n_hip
     
     col_info1, col_info2, col_info3 = st.columns(3)
-    col_info1.metric("📊 Preparados con datos", total_preps)
+    col_info1.metric("📊 Individuos con datos", total_individuals)
     col_info2.metric("CTL", n_ctl)
-    col_info3.metric("Hipoxia", n_hip)
+    col_info3.metric("Hypoxia", n_hip)
     
-    if total_preps < 6:
-        st.warning(f"⚠️ Pocos datos disponibles para esta métrica. Se recomienda re-ejecutar el paso 04 (Sholl) o 05 (topología) en más preparados.")
+    if total_individuals < 6:
+        st.warning(f"⚠️ Pocos datos disponibles para esta métrica. Se recomienda re-ejecutar el paso 04 (Sholl) o 05 (topología) en más individuos.")
 
 # --- 1. Gráfico de Distribución (usando df_plot) ---
 col_plot1, col_plot2 = st.columns(2)
@@ -354,13 +355,13 @@ with col_plot1:
 with col_plot2:
     data_source_level = st.radio(
         "Nivel de análisis para el gráfico:",
-        options=["Por Preparado (Mediana)", "Por Célula (Individual)"],
+        options=["Por Individuo (Animal)", "Por Célula (Individual)"],
         index=0,
         horizontal=True,
-        help="Por preparado muestra un punto por animal (mediana). Por célula muestra todas las células medidas."
+        help="Por individuo muestra un punto por animal (media). Por célula muestra todas las células medidas."
     )
 
-df_to_plot = df_stats if data_source_level == "Por Preparado (Mediana)" else df_plot
+df_to_plot = df_stats if data_source_level == "Por Individuo (Animal)" else df_plot
 n_points = df_to_plot[selected_metric].dropna().shape[0]
 st.markdown(f"**Distribución {data_source_level} (N={n_points} puntos)**")
 
@@ -373,13 +374,13 @@ st.altair_chart(chart, use_container_width=True)
 _download_df_button(df_to_plot.dropna(subset=[selected_metric]), filename_base=f"datos_grafico_{selected_metric}", label="⬇️ Descargar datos de este gráfico (CSV)")
 
 # --- 2. Test Estadístico (usando df_stats) ---
-st.markdown("**Test Estadístico (sobre medianas por preparado)**")
+st.markdown("**Test Estadístico (sobre promedios por individuo)**")
 if selected_metric not in df_stats.columns:
-    st.warning(f"La métrica '{selected_metric}' no se pudo agregar por preparado.")
+    st.warning(f"La métrica '{selected_metric}' no se pudo agregar por individuo.")
 else:
     try:
         a = df_stats.loc[df_stats['group']=='CTL', selected_metric].dropna().to_numpy()
-        b = df_stats.loc[df_stats['group']=='Hipoxia', selected_metric].dropna().to_numpy()
+        b = df_stats.loc[df_stats['group']=='Hypoxia', selected_metric].dropna().to_numpy()
         
         if a.size > 0 and b.size > 0:
             test_results = run_comparison_test(a, b)
@@ -434,7 +435,7 @@ else:
                 
                 st.markdown(reporte_stats)
         else:
-            st.caption("No hay suficientes datos por preparado para ambos grupos para el test.")
+            st.caption("No hay suficientes datos por individuo para ambos grupos para el test.")
     except Exception as e:
         st.caption(f"Error al calcular estadísticas: {e}")
         st.exception(e)
@@ -446,34 +447,34 @@ st.markdown("### 📈 Análisis de Curvas de Sholl")
 if df_sholl_curves.empty:
     st.info("No hay datos de curvas Sholl disponibles para comparar.")
 else:
-    # 1. Agregación Robusta: Promedio por preparado primero (evita pseudoreplicación)
-    # Unidad experimental = Preparado
-    df_sholl_prep = df_sholl_curves.groupby(['group', 'prepared', 'radius_um'])['intersections'].mean().reset_index()
+    # 1. Agregación Robusta: Promedio por individuo primero (evita pseudoreplicación)
+    # Unidad experimental = Individuo
+    df_sholl_prep = df_sholl_curves.groupby(['group', 'individual', 'radius_um'])['intersections'].mean().reset_index()
     
-    # 2. Visualización (Media ± SEM de los preparados)
-    st.markdown("**Perfiles de Sholl (Media ± Error Estándar de los Preparados)**")
+    # 2. Visualización (Media ± SEM de los individuos)
+    st.markdown("**Perfiles de Sholl (Media ± Error Estándar de los Individuos)**")
     
     base = alt.Chart(df_sholl_prep).encode(
-        x=alt.X('radius_um:Q', title='Radio (µm)'),
-        color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c']))
+        x=alt.X('radius_um:Q', title='Radius (µm)'),
+        color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hypoxia'], range=['#377eb8', '#e41a1c']))
     )
     
     line = base.mark_line(point=False).encode(
-        y=alt.Y('mean(intersections):Q', title='Intersecciones (Media)')
+        y=alt.Y('mean(intersections):Q', title='Intersections (Mean)')
     )
     
     band = base.mark_errorband(extent='stderr').encode(
-        y=alt.Y('intersections:Q', title='Intersecciones')
+        y=alt.Y('intersections:Q', title='Intersections')
     )
     
     chart_sholl = (band + line).properties(height=400)
     st.altair_chart(chart_sholl, use_container_width=True)
-    _download_df_button(df_sholl_prep, filename_base="datos_grafico_curvas_sholl", label="⬇️ Descargar datos de este gráfico (CSV)")
+    _download_df_button(df_sholl_prep, filename_base="datos_grafico_curvas_sholl", label="⬇️ Download Data for this Chart (CSV)")
     
     # 3. Estadística (Área Bajo la Curva - AUC)
     st.markdown("**Análisis Estadístico (Área Bajo la Curva - AUC)**")
     
-    # Calcular la integral (AUC) para cada preparado
+    # Calcular la integral (AUC) para cada individuo
     def compute_auc(group_df):
         x = group_df['radius_um'].values
         y = group_df['intersections'].values
@@ -483,9 +484,9 @@ else:
 
     # Aplicar cálculo de AUC
     auc_records = []
-    for (group, prep), df_group in df_sholl_prep.groupby(['group', 'prepared']):
+    for (group, individual), df_group in df_sholl_prep.groupby(['group', 'individual']):
         auc = compute_auc(df_group)
-        auc_records.append({'group': group, 'prepared': prep, 'sholl_auc': auc})
+        auc_records.append({'group': group, 'individual': individual, 'sholl_auc': auc})
         
     df_auc = pd.DataFrame(auc_records)
 
@@ -494,16 +495,16 @@ else:
     with col_auc_plot:
         # Gráfico de Boxplot del AUC
         st.markdown("**Distribución del AUC por Grupo**")
-        chart_auc = boxplot_vertical(df_auc, 'sholl_auc', 'group', title_y="Área Bajo la Curva (AUC)")
+        chart_auc = boxplot_vertical(df_auc, 'sholl_auc', 'group', title_y="Area Under the Curve (AUC)")
         st.altair_chart(chart_auc, use_container_width=True)
-        _download_df_button(df_auc, filename_base="datos_grafico_auc_sholl", label="⬇️ Descargar datos de este gráfico (CSV)")
+        _download_df_button(df_auc, filename_base="datos_grafico_auc_sholl", label="⬇️ Download Data for this Chart (CSV)")
 
     with col_auc_stats:
         # Test estadístico del AUC
         st.markdown("**Test sobre el AUC Total**")
         try:
             a_auc = df_auc.loc[df_auc['group'] == 'CTL', 'sholl_auc'].dropna().to_numpy()
-            b_auc = df_auc.loc[df_auc['group'] == 'Hipoxia', 'sholl_auc'].dropna().to_numpy()
+            b_auc = df_auc.loc[df_auc['group'] == 'Hypoxia', 'sholl_auc'].dropna().to_numpy()
             
             if a_auc.size > 0 and b_auc.size > 0:
                 test_auc = run_comparison_test(a_auc, b_auc)
@@ -528,12 +529,12 @@ else:
                         
                     st.metric("Significancia (p-valor)", p_display)
                     
-                    st.info(f"*(N(CTL)={test_auc['n_a']}, N(Hip)={test_auc['n_b']} preparados)*")
+                    st.info(f"*(N(CTL)={test_auc['n_a']}, N(Hip)={test_auc['n_b']} individuos)*")
             else:
-                st.caption("No hay suficientes datos por preparado para comparar AUC.")
+                st.caption("No hay suficientes datos por individuo para comparar AUC.")
         except Exception as e:
             st.error(f"Error procesando estadística AUC: {e}")
-        st.caption("Verificá que los radios sean consistentes entre preparados.")
+        st.caption("Verificá que los radios sean consistentes entre individuos.")
 
 st.markdown("---")
 st.markdown("### 📊 Datos Agregados y Exportación")
@@ -541,13 +542,13 @@ st.markdown("### 📊 Datos Agregados y Exportación")
 st.markdown("""
 Los datos se presentan en dos formatos:
 - **Por Célula**: Todas las células individuales (útil para gráficos de distribución)
-- **Por Preparado**: Mediana de cada preparado (correcto para análisis estadístico, evita pseudoreplicación)
+- **Por Individuo**: Mediana/Media de cada animal (correcto para análisis estadístico, evita pseudoreplicación)
 """)
 
 col1, col2 = st.columns(2)
 with col1:
     st.markdown("**Datos por Célula (para gráficos)**")
-    st.caption(f"Total: {df_plot.shape[0]} células de {df_plot['prepared'].nunique()} preparados")
+    st.caption(f"Total: {df_plot.shape[0]} células de {df_plot['individual'].nunique()} individuos")
     st.dataframe(
         df_plot.round(3),
         use_container_width=True,
@@ -555,42 +556,42 @@ with col1:
         column_config={
             "label": st.column_config.NumberColumn("ID", format="%d"),
             "group": st.column_config.TextColumn("Grupo"),
-            "prepared": st.column_config.TextColumn("Preparado")
+            "prepared": st.column_config.TextColumn("Preparado"),
+            "individual": st.column_config.TextColumn("Individuo")
         }
     )
     _download_df_button(df_plot, "metricas_por_celula", "⬇️ Descargar CSV (por célula)")
     
 with col2:
-    st.markdown("**Datos por Preparado (para estadística)**")
-    st.caption(f"Total: {df_stats.shape[0]} preparados (mediana de cada preparado)")
+    st.markdown("**Datos por Individuo (para estadística)**")
+    st.caption(f"Total: {df_stats.shape[0]} individuos (promedio de cada animal)")
     st.dataframe(
         df_stats.round(3),
         use_container_width=True,
         height=400,
         column_config={
             "group": st.column_config.TextColumn("Grupo"),
-            "prepared": st.column_config.TextColumn("Preparado")
+            "individual": st.column_config.TextColumn("Individuo")
         }
     )
-    _download_df_button(df_stats, "metricas_por_preparado", "⬇️ Descargar CSV (por preparado)")
+    _download_df_button(df_stats, "metricas_por_individuo", "⬇️ Descargar CSV (por individuo)")
 
 st.markdown("---")
 st.markdown("### 🧠 Análisis de Componentes Principales (PCA)")
 
 st.markdown("""
-El PCA permite visualizar si el conjunto global de métricas morfológicas y topológicas es suficiente para 
-segregar los astrocitos de **Control** versus los de **Hipoxia** en el plano de máxima variación.
+segregar los astrocitos de **Control** versus los de **Hypoxia** en el plano de máxima variación.
 """)
 
 pca_data_source = st.radio(
     "Seleccioná la fuente de datos para el PCA:",
-    options=["Por Preparado (Mediana)", "Por Célula (Individual)"],
+    options=["Por Individuo (Animal)", "Por Célula (Individual)"],
     index=0,
     horizontal=True,
-    help="Por preparado evita la pseudoreplicación y muestra la tendencia de cada individuo. Por célula muestra la heterogeneidad de toda la población."
+    help="Por individuo evita la pseudoreplicación y muestra la tendencia de cada animal. Por célula muestra la heterogeneidad de toda la población."
 )
 
-df_pca_source = df_stats if pca_data_source == "Por Preparado (Mediana)" else df_plot
+df_pca_source = df_stats if pca_data_source == "Por Individuo (Animal)" else df_plot
 
 # --- Selección Curada de Variables para PCA ---
 with st.expander("🛠️ Configuración de Variables PCA", expanded=True):
@@ -668,7 +669,7 @@ else:
         
         # Test Multivariado (Hotelling T2) sobre PC1 y PC2
         ctl_pc = df_pca_clean[df_pca_clean['group'] == 'CTL'][['PC1', 'PC2']]
-        hip_pc = df_pca_clean[df_pca_clean['group'] == 'Hipoxia'][['PC1', 'PC2']]
+        hip_pc = df_pca_clean[df_pca_clean['group'] == 'Hypoxia'][['PC1', 'PC2']]
         
         
         has_stats = False
@@ -683,7 +684,7 @@ else:
             except Exception as e:
                 stat_error = str(e)
         else:
-            stat_error = f"Insuficientes datos (CTL: {len(ctl_pc)}, Hipoxia: {len(hip_pc)}). Se necesitan al menos 3 por grupo."
+            stat_error = f"Insuficientes datos (CTL: {len(ctl_pc)}, Hypoxia: {len(hip_pc)}). Se necesitan al menos 3 por grupo."
         
         # Calcular Elipses de Confianza (95%)
         def get_ellipse_df(data, group_name):
@@ -722,7 +723,7 @@ else:
 
         df_ellipses = pd.concat([
             get_ellipse_df(ctl_pc, 'CTL'),
-            get_ellipse_df(hip_pc, 'Hipoxia')
+            get_ellipse_df(hip_pc, 'Hypoxia')
         ], ignore_index=True)
 
         # --- Visualización Scatter PCA Mejorada ---
@@ -732,7 +733,7 @@ else:
         base = alt.Chart(df_pca_clean).encode(
             x=alt.X('PC1:Q', title=f'PC1 ({var_ratio[0]:.1f}%)'),
             y=alt.Y('PC2:Q', title=f'PC2 ({var_ratio[1]:.1f}%)'),
-            color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hipoxia'], range=['#377eb8', '#e41a1c']))
+            color=alt.Color('group:N', scale=alt.Scale(domain=['CTL', 'Hypoxia'], range=['#377eb8', '#e41a1c']))
         )
 
         # Puntos individuales discretos
@@ -765,7 +766,7 @@ else:
         st.markdown("#### Estadística de Segregación de Grupos")
         if has_stats:
             c1_pos = df_centroids[df_centroids['group'] == 'CTL'][['PC1', 'PC2']].values[0]
-            c2_pos = df_centroids[df_centroids['group'] == 'Hipoxia'][['PC1', 'PC2']].values[0]
+            c2_pos = df_centroids[df_centroids['group'] == 'Hypoxia'][['PC1', 'PC2']].values[0]
             dist_c = np.linalg.norm(c1_pos - c2_pos)
             
             scol1, scol2, scol3 = st.columns(3)
@@ -792,7 +793,7 @@ else:
             1. **¿Qué son los ejes PC1 y PC2?**
                Son las variaciones morfológicas más importantes. El porcentaje (%) indica cuánta variabilidad total capturan.
             
-            2. **Los Puntos**: Cada punto es un preparado (o célula). Puntos cercanos tienen morfologías similares.
+            2. **Los Puntos**: Cada punto es un individuo (o célula). Puntos cercanos tienen morfologías similares.
             
             3. **Los Centroides (Cruces ✚)**: Representan el "promedio" de cada grupo. 
                - **Distancia**: Mayor distancia indica mayor diferencia morfológica global.

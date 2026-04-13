@@ -72,8 +72,8 @@ def render_sidebar(show_calibration: bool = True):
         st.markdown("**🔍 Filtro de Grupo**")
         grp = st.radio(
             "Grupo",
-            options=["Todos", "CTL", "Hipoxia"],
-            index={"Todos":0, "CTL":1, "Hipoxia":2}.get(st.session_state.get("group_filter", "Todos"), 0),
+            options=["Todos", "CTL", "Hypoxia"],
+            index={"Todos":0, "CTL":1, "Hypoxia":2}.get(st.session_state.get("group_filter", "Todos"), 0),
             horizontal=True,
             key="__sidebar_group_radio__",
         )
@@ -253,7 +253,7 @@ def render_sidebar(show_calibration: bool = True):
                 
                 scope_opt = st.selectbox(
                     "Ámbito de ejecución",
-                    options=["📁 Todos los preparados", "🔵 Solo grupo CTL", "🔴 Solo grupo Hipoxia"],
+                    options=["📁 Todos los preparados", "🔵 Solo grupo CTL", "🔴 Solo grupo Hypoxia"],
                     index=0,
                     help="Selecciona qué preparados procesar"
                 )
@@ -283,8 +283,8 @@ def render_sidebar(show_calibration: bool = True):
                         # Parsear ámbito
                         if "CTL" in scope_opt:
                             scope, group = "group", "CTL"
-                        elif "Hipoxia" in scope_opt:
-                            scope, group = "group", "Hipoxia"
+                        elif "Hypoxia" in scope_opt:
+                            scope, group = "group", "Hypoxia"
                         else:
                             scope, group = "all", None
                         

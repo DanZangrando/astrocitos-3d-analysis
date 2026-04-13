@@ -27,13 +27,13 @@ def _detect_group(p: Path, root: Path) -> str:
     except Exception:
         rel = str(p).lower()
     if "/hip/" in rel:
-        return "Hipoxia"
+        return "Hypoxia"
     if "/ctl/" in rel:
         return "CTL"
     return "CTL"
 
 def _group_badge_html(group: str) -> str:
-    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    color = {"CTL": "#1f77b4", "Hypoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
 
 def _read_global_calibration():
@@ -154,16 +154,16 @@ else:
         
         with col_g1:
             chart_len = alt.Chart(df_skel).mark_bar().encode(
-                x=alt.X('total_branch_length_um:Q', bin=alt.Bin(maxbins=20), title='Longitud Total (µm)'),
-                y=alt.Y('count()', title='Frecuencia')
-            ).properties(height=250, title="Distribución: Longitud Total")
+                x=alt.X('total_branch_length_um:Q', bin=alt.Bin(maxbins=20), title='Total Length (µm)'),
+                y=alt.Y('count()', title='Frequency')
+            ).properties(height=250, title="Distribution: Total Length")
             st.altair_chart(chart_len, use_container_width=True)
             
         with col_g2:
             chart_ram = alt.Chart(df_skel).mark_bar().encode(
-                x=alt.X('ramification_index:Q', bin=alt.Bin(maxbins=20), title='Índice de Ramificación'),
-                y=alt.Y('count()', title='Frecuencia')
-            ).properties(height=250, title="Distribución: Índice de Ramificación")
+                x=alt.X('ramification_index:Q', bin=alt.Bin(maxbins=20), title='Ramification Index'),
+                y=alt.Y('count()', title='Frequency')
+            ).properties(height=250, title="Distribution: Ramification Index")
             st.altair_chart(chart_ram, use_container_width=True)
 
     except Exception as e:
@@ -204,11 +204,11 @@ else:
             df_sholl_curves = pd.read_csv(p_sholl_2d)
             
             chart_sholl = alt.Chart(df_sholl_curves).mark_line(point=False).encode(
-                x=alt.X('radius_um:Q', title='Radio desde Núcleo (µm)'),
-                y=alt.Y('intersections:Q', title='Intersecciones'),
-                color=alt.Color('label:N', title='Astrocito', legend=None),
+                x=alt.X('radius_um:Q', title='Radius from Nucleus (µm)'),
+                y=alt.Y('intersections:Q', title='Intersections'),
+                color=alt.Color('label:N', title='Astrocyte', legend=None),
                 opacity=alt.value(0.6)
-            ).properties(height=350, title="Curvas de Sholl - Todas las Células").interactive()
+            ).properties(height=350, title="Sholl Curves - All Cells").interactive()
             
             st.altair_chart(chart_sholl, use_container_width=True)
             
@@ -218,9 +218,9 @@ else:
             df_sholl_avg['upper'] = df_sholl_avg['mean'] + df_sholl_avg['std']
             
             chart_avg = alt.Chart(df_sholl_avg).mark_line(color='black', size=3).encode(
-                x=alt.X('radius_um:Q', title='Radio (µm)'),
-                y=alt.Y('mean:Q', title='Intersecciones Promedio')
-            ).properties(height=300, title="Perfil de Sholl Promedio ± 1 SD")
+                x=alt.X('radius_um:Q', title='Radius (µm)'),
+                y=alt.Y('mean:Q', title='Average Intersections')
+            ).properties(height=300, title="Average Sholl Profile ± 1 SD")
             
             chart_band = alt.Chart(df_sholl_avg).mark_area(opacity=0.3, color='gray').encode(
                 x='radius_um:Q',

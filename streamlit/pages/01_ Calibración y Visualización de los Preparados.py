@@ -134,11 +134,11 @@ if not all_files:
 
 groups = [detect_group(p, root) for p in all_files]
 g_ctl = sum(1 for g in groups if g == "CTL")
-g_hip = sum(1 for g in groups if g == "Hipoxia")
+g_hip = sum(1 for g in groups if g == "Hypoxia")
 
 cc1, cc2 = st.columns(2)
 cc1.metric("Total de preparados (.tif/.tiff)", len(all_files))
-cc2.metric("CTL / Hipoxia", f"{g_ctl} / {g_hip}", help="Conteo por grupo principal")
+cc2.metric("CTL / Hypoxia", f"{g_ctl} / {g_hip}", help="Conteo por grupo principal")
 
 # Filtro por grupo
 # Filtro por grupo (unificado desde la barra lateral)
@@ -157,7 +157,7 @@ idx = st.selectbox("Elegí un preparado", options=list(range(len(files_avail))),
 img_path = files_avail[idx]
 sel_group = detect_group(img_path, root)
 def _group_badge_html(group: str) -> str:
-    color = {"CTL": "#1f77b4", "Hipoxia": "#d62728"}.get(group, "#7f7f7f")
+    color = {"CTL": "#1f77b4", "Hypoxia": "#d62728"}.get(group, "#7f7f7f")
     return f"<span style='background:{color};color:white;padding:3px 8px;border-radius:999px;font-weight:600;font-size:0.85rem;'>{group}</span>"
 st.markdown(_group_badge_html(sel_group), unsafe_allow_html=True)
 

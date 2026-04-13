@@ -64,7 +64,7 @@ if not files:
     st.warning("No se encontraron imágenes .tif/.tiff en `data/raw/`")
     st.stop()
 
-# Agrupación por grupo (CTL vs Hipoxia)
+# Agrupación por grupo (CTL vs Hypoxia)
 file_groups = {}
 for f in files:
     g = detect_group(f, root)

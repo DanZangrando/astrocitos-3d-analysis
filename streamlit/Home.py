@@ -40,7 +40,7 @@ El análisis se estructura en 5 pasos secuenciales:
     *   Definición de territorios celulares (Voronoi con exclusión).
     *   Esqueletización topológica y análisis de **Sholl** nativo.
 5.  **Análisis por Preparado (05)**: Validación y exploración de resultados individuales.
-6.  **Comparación de Grupos (06)**: Análisis estadístico robusto (**CTL vs Hipoxia**) evitando pseudoreplicación.
+6.  **Comparación de Grupos (06)**: Análisis estadístico robusto (**CTL vs Hypoxia**) evitando pseudoreplicación.
 
 ---
 
